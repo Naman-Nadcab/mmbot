@@ -12,8 +12,11 @@ from typing import Any
 from mmbot.core.config import Settings, default_runtime_config
 from mmbot.db.session import Database
 from mmbot.engines.market_data.engine import MarketDataEngine
+from mmbot.engines.market_data.runtime import MarketDataRuntime
 from mmbot.engines.market_making.engine import QuoteEngine
+from mmbot.engines.market_making.runtime import MarketMakerRuntime
 from mmbot.observability.logging import configure_logging
+from mmbot.observability.metrics import RuntimeMetrics
 from mmbot.redis.manager import CacheManager, EngineCommunicationLayer, PubSubFramework, RedisManager
 
 logger = logging.getLogger(__name__)
@@ -51,8 +54,11 @@ class EngineDaemon:
         self.last_error: str | None = None
         self._shutdown_event = asyncio.Event()
         self.database: Database | None = None
+        self.session: Any | None = None
         self.redis: RedisManager | None = None
         self.engine: MarketDataEngine | QuoteEngine | None = None
+        self.runtime: MarketDataRuntime | MarketMakerRuntime | None = None
+        self.metrics = RuntimeMetrics()
 
     async def run(self) -> None:
         configure_logging(self.settings.LOG_LEVEL)
@@ -73,6 +79,8 @@ class EngineDaemon:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    if self.session is not None:
+                        await self.session.rollback()
                     self.consecutive_errors += 1
                     self.last_error = f'{exc.__class__.__name__}: {exc}'
                     logger.exception(
@@ -95,11 +103,14 @@ class EngineDaemon:
         self.redis = RedisManager(self.settings)
         cache = CacheManager(self.redis.client)
         bus = EngineCommunicationLayer(PubSubFramework(self.redis.client), cache)
+        self.database = Database(self.settings)
+        self.session = self.database.session_factory()
         if self.component_name == 'market-data-engine':
             self.engine = MarketDataEngine(runtime_config.liquidity, bus)
+            self.runtime = MarketDataRuntime(self.settings, self.session, bus, self.engine, self.metrics)
         elif self.component_name == 'market-maker-engine':
-            self.database = Database(self.settings)
             self.engine = QuoteEngine(runtime_config.spread, runtime_config.order_size, runtime_config.inventory)
+            self.runtime = MarketMakerRuntime(self.settings, self.session, bus, self.engine, self.metrics)
         else:
             raise ValueError(f'Unsupported engine component: {self.component_name}')
 
@@ -113,12 +124,17 @@ class EngineDaemon:
             database_ok = await self.database.health_check()
         if not redis_ok or not database_ok:
             raise RuntimeError(f'dependency health failed redis={redis_ok} database={database_ok}')
+        if self.runtime is not None:
+            await self.runtime.tick()
+        if self.session is not None:
+            await self.session.commit()
         await self._publish_heartbeat(redis_ok=redis_ok, database_ok=database_ok)
 
     async def _publish_heartbeat(self, redis_ok: bool, database_ok: bool) -> None:
         if self.redis is None:
             return
-        payload = self._snapshot('healthy').__dict__ | {'redis_ok': redis_ok, 'database_ok': database_ok}
+        runtime_health = self.runtime.health() if self.runtime is not None else {}
+        payload = self._snapshot('healthy').__dict__ | {'redis_ok': redis_ok, 'database_ok': database_ok, 'runtime': runtime_health}
         await self.redis.client.set(f'engine:health:{self.component_name}', json.dumps(payload, separators=(',', ':'), default=str), ex=max(120, int(self.heartbeat_interval_seconds * 3)))
 
     def _snapshot(self, status: str) -> EngineHealthSnapshot:
@@ -171,6 +187,10 @@ class EngineDaemon:
     async def _shutdown(self) -> None:
         logger.info('engine_shutdown_started', extra={'component_name': self.component_name})
         await self._write_health('stopping')
+        if self.runtime is not None:
+            await self.runtime.stop()
+        if self.session is not None:
+            await self.session.close()
         if self.redis is not None:
             await self.redis.close()
         if self.database is not None:

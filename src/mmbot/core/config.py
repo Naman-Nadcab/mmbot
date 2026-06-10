@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["development", "staging", "production", "test"]
+TradingMode = Literal["shadow", "paper", "canary", "live"]
 
 
 class Settings(BaseSettings):
@@ -34,6 +35,17 @@ class Settings(BaseSettings):
     HTTP_TIMEOUT_SECONDS: float = 10.0
     EXCHANGE_RECONNECT_MAX_DELAY_SECONDS: float = 30.0
     JWT_ALGORITHM: str = "HS256"
+    TRADING_MODE: TradingMode = "paper"
+    MARKET_DATA_EXCHANGES: list[str] = Field(default_factory=lambda: ["binance", "coinstore", "mexc", "gate", "bitmart", "kucoin"])
+    MARKET_DATA_SYMBOLS: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
+    MARKET_DATA_STREAMS: list[str] = Field(default_factory=lambda: ["orderbook", "trades", "ticker", "kline"])
+    MARKET_DATA_CONNECT_ON_START: bool = True
+    MARKET_DATA_PERSIST_EVERY_N_MESSAGES: int = 25
+    MARKET_MAKER_REFRESH_SECONDS: float = 5.0
+    RECONCILIATION_INTERVAL_SECONDS: float = 60.0
+    PAPER_STARTING_CASH: float = 100000.0
+    PAPER_BASE_ASSET: str = "BTC"
+    PAPER_QUOTE_ASSET: str = "USDT"
 
     @field_validator("LOG_LEVEL")
     @classmethod
@@ -55,6 +67,21 @@ class Settings(BaseSettings):
         if url.startswith("postgresql+psycopg2://") or url.startswith("postgresql+psycopg://"):
             raise ValueError("DATABASE_URL must use an async driver: postgresql+asyncpg://")
         return url
+
+    @field_validator("MARKET_DATA_EXCHANGES", "MARKET_DATA_SYMBOLS", "MARKET_DATA_STREAMS", mode="before")
+    @classmethod
+    def parse_string_lists(cls, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("["):
+                parsed = json.loads(stripped)
+                if not isinstance(parsed, list):
+                    raise ValueError("expected a JSON array")
+                return [str(item).strip() for item in parsed if str(item).strip()]
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        raise ValueError("expected list, JSON array string, or comma-separated string")
 
     @field_validator("EXCHANGE_API_KEYS", "EXCHANGE_API_SECRETS", "EXCHANGE_API_PASSPHRASES", "EXCHANGE_API_MEMOS", mode="before")
     @classmethod
