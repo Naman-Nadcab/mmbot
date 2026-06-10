@@ -1,0 +1,23 @@
+venues:
+  coinstore: &workflow
+    authentication: pending
+    balance_retrieval: pending
+    order_placement: pending
+    order_acknowledgement: pending
+    order_status_sync: pending
+    order_cancellation: pending
+    order_replacement: pending
+    websocket_updates: pending
+    reconciliation: pending
+    retry_behavior: pending
+    failure_recovery: pending
+  mexc: *workflow
+  gate: *workflow
+  bitmart: *workflow
+  kucoin: *workflow
+  binance: *workflow
+certification_gates:
+  sandbox_required: true
+  canary_required: true
+  live_credentials_required: true
+  manual_risk_approval_required: true

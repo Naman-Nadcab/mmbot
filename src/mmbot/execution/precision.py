@@ -6,7 +6,7 @@ from mmbot.execution.models import OrderIntent, SymbolPrecision
 
 
 class PrecisionError(ValueError):
-    pass
+    """Raised when an order cannot satisfy venue precision filters."""
 
 
 def quantize_down(value: Decimal, increment: Decimal) -> Decimal:

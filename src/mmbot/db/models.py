@@ -38,7 +38,7 @@ class PortableUUID(TypeDecorator):
 
 
 class Base(DeclarativeBase):
-    pass
+    """Declarative base for all ORM models."""
 
 
 class UserStatus(str, enum.Enum):
