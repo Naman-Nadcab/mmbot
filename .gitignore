@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Node/dashboard
+node_modules/
+dist/
+build/
+.next/
+coverage/
+
+# Local env and secrets
+.env.local
+.env.*.local
+.env.secrets
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Runtime state
+logs/
+*.log
+*.pid
+.tmp/
+tmp/
+postgres-data/
+redis-data/
+
+# IDE/OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,64 @@
+openapi: 3.1.0
+info:
+  title: Institutional Market Making Platform API
+  version: 0.1.0-bootstrap
+  description: Bootstrap API contract. No trading logic or exchange integrations are implemented.
+servers:
+  - url: http://localhost:8000
+    description: Local development placeholder
+tags:
+  - name: Health
+  - name: Administration
+  - name: Risk
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness check
+      responses:
+        '200':
+          description: Dependencies are ready
+        '503':
+          description: One or more dependencies are unavailable
+  /version:
+    get:
+      tags: [Health]
+      summary: Build and deployment version
+      responses:
+        '200':
+          description: Version information
+  /admin/kill-switch:
+    post:
+      tags: [Administration, Risk]
+      summary: Planned emergency kill switch endpoint
+      description: Contract placeholder requiring RBAC, MFA, audit logging, and risk approval before implementation.
+      security:
+        - bearerAuth: []
+      responses:
+        '501':
+          description: Not implemented in bootstrap foundation
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
