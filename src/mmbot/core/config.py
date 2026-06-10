@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str
     EXCHANGE_API_KEYS: Dict[str, str] = Field(default_factory=dict)
     EXCHANGE_API_SECRETS: Dict[str, str] = Field(default_factory=dict)
+    EXCHANGE_API_PASSPHRASES: Dict[str, str] = Field(default_factory=dict)
+    EXCHANGE_API_MEMOS: Dict[str, str] = Field(default_factory=dict)
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
     DB_POOL_TIMEOUT_SECONDS: int = 30
@@ -42,7 +44,7 @@ class Settings(BaseSettings):
             raise ValueError(f"LOG_LEVEL must be one of {sorted(allowed)}")
         return normalized
 
-    @field_validator("EXCHANGE_API_KEYS", "EXCHANGE_API_SECRETS", mode="before")
+    @field_validator("EXCHANGE_API_KEYS", "EXCHANGE_API_SECRETS", "EXCHANGE_API_PASSPHRASES", "EXCHANGE_API_MEMOS", mode="before")
     @classmethod
     def parse_exchange_maps(cls, value: Any) -> Dict[str, str]:
         if isinstance(value, dict):
