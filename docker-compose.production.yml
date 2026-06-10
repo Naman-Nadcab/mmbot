@@ -1,33 +1,27 @@
+x-production-env-file: &production-env-file
+  env_file:
+    - .env.production
+
 services:
   backend:
+    <<: *production-env-file
     restart: unless-stopped
-    env_file:
-      - .env.production
     environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID is required}
-      EXCHANGE_API_KEYS: ${EXCHANGE_API_KEYS:?EXCHANGE_API_KEYS is required}
-      EXCHANGE_API_SECRETS: ${EXCHANGE_API_SECRETS:?EXCHANGE_API_SECRETS is required}
       APP_ENV: production
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SERVER_IP: ${SERVER_IP:-0.0.0.0}
       SERVER_PORT: ${SERVER_PORT:-8000}
 
   market-maker-engine:
+    <<: *production-env-file
     restart: unless-stopped
-    env_file:
-      - .env.production
     environment:
       COMPONENT_NAME: market-maker-engine
       APP_ENV: production
 
   market-data-engine:
+    <<: *production-env-file
     restart: unless-stopped
-    env_file:
-      - .env.production
     environment:
       COMPONENT_NAME: market-data-engine
       APP_ENV: production

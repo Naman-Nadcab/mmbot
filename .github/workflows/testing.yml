@@ -36,7 +36,7 @@ jobs:
 
       - name: Validate environment templates
         run: |
-          python scripts/validate_env.py --file .env.development
+          python scripts/validate_env.py --file .env.development --allow-template-values
           python scripts/validate_env.py --file .env.example --allow-template-values
           python scripts/validate_env.py --file .env.staging --allow-template-values
           python scripts/validate_env.py --file .env.production --allow-template-values

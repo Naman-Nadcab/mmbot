@@ -1,3 +1,5 @@
+import secrets
+
 import pytest
 
 from mmbot.core.config import Settings, default_runtime_config
@@ -12,7 +14,7 @@ async def test_config_repository_versions_and_runtime_config():
         APP_ENV="test",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         REDIS_URL="redis://localhost:6379/0",
-        JWT_SECRET="x" * 40,
+        JWT_SECRET=secrets.token_urlsafe(48),
         TELEGRAM_BOT_TOKEN="token",
         TELEGRAM_CHAT_ID="chat",
         EXCHANGE_API_KEYS={"binance": "key"},
