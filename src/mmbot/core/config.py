@@ -44,6 +44,18 @@ class Settings(BaseSettings):
             raise ValueError(f"LOG_LEVEL must be one of {sorted(allowed)}")
         return normalized
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value: Any) -> str:
+        url = str(value)
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql+psycopg2://") or url.startswith("postgresql+psycopg://"):
+            raise ValueError("DATABASE_URL must use an async driver: postgresql+asyncpg://")
+        return url
+
     @field_validator("EXCHANGE_API_KEYS", "EXCHANGE_API_SECRETS", "EXCHANGE_API_PASSPHRASES", "EXCHANGE_API_MEMOS", mode="before")
     @classmethod
     def parse_exchange_maps(cls, value: Any) -> Dict[str, str]:
