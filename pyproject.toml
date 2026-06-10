@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mmbot"
+version = "0.2.0"
+description = "Institutional cryptocurrency market making platform"
+requires-python = ">=3.12"
+dependencies = [
+  "aiosqlite==0.22.1",
+  "anyio==4.13.0",
+  "asyncpg==0.31.0",
+  "cryptography==48.0.1",
+  "fastapi==0.136.3",
+  "httpx==0.28.1",
+  "pydantic-settings==2.14.1",
+  "PyJWT==2.13.0",
+  "redis==8.0.0",
+  "SQLAlchemy==2.0.50",
+  "tenacity==9.1.4",
+  "uvicorn==0.49.0",
+  "websockets==16.0"
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.0.3", "pytest-asyncio==1.4.0"]
+
+[project.scripts]
+mmbot-api = "mmbot.api.main:run"
+mmbot-db = "mmbot.cli.database:main"
+mmbot-engine = "mmbot.cli.engine:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

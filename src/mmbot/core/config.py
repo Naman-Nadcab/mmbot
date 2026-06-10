@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from typing import Any, Dict, Literal
+
+from pydantic import BaseModel, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+AppEnv = Literal["development", "staging", "production", "test"]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=None, case_sensitive=True, extra="ignore")
+
+    APP_ENV: AppEnv = "development"
+    LOG_LEVEL: str = "INFO"
+    SERVER_IP: str = "127.0.0.1"
+    SERVER_PORT: int = 8000
+    DATABASE_URL: str
+    REDIS_URL: str
+    REDIS_PASSWORD: str | None = None
+    JWT_SECRET: str
+    TELEGRAM_BOT_TOKEN: str
+    TELEGRAM_CHAT_ID: str
+    EXCHANGE_API_KEYS: Dict[str, str] = Field(default_factory=dict)
+    EXCHANGE_API_SECRETS: Dict[str, str] = Field(default_factory=dict)
+    EXCHANGE_API_PASSPHRASES: Dict[str, str] = Field(default_factory=dict)
+    EXCHANGE_API_MEMOS: Dict[str, str] = Field(default_factory=dict)
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT_SECONDS: int = 30
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = 5.0
+    HTTP_TIMEOUT_SECONDS: float = 10.0
+    EXCHANGE_RECONNECT_MAX_DELAY_SECONDS: float = 30.0
+    JWT_ALGORITHM: str = "HS256"
+
+    @field_validator("LOG_LEVEL")
+    @classmethod
+    def validate_log_level(cls, value: str) -> str:
+        normalized = value.upper()
+        allowed = {"TRACE", "DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"}
+        if normalized not in allowed:
+            raise ValueError(f"LOG_LEVEL must be one of {sorted(allowed)}")
+        return normalized
+
+    @field_validator("EXCHANGE_API_KEYS", "EXCHANGE_API_SECRETS", "EXCHANGE_API_PASSPHRASES", "EXCHANGE_API_MEMOS", mode="before")
+    @classmethod
+    def parse_exchange_maps(cls, value: Any) -> Dict[str, str]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            if not isinstance(parsed, dict):
+                raise ValueError("exchange credential values must be JSON objects")
+            return {str(k): str(v) for k, v in parsed.items()}
+        raise ValueError("exchange credential values must be JSON objects")
+
+    @field_validator("JWT_SECRET")
+    @classmethod
+    def validate_jwt_secret(cls, value: str) -> str:
+        if len(value) < 32:
+            raise ValueError("JWT_SECRET must contain at least 32 characters")
+        return value
+
+    def exchange_credentials(self, alias: str) -> tuple[str, str]:
+        return self.EXCHANGE_API_KEYS[alias], self.EXCHANGE_API_SECRETS[alias]
+
+
+class SpreadSettings(BaseModel):
+    base_spread_bps: float = Field(gt=0)
+    min_spread_bps: float = Field(gt=0)
+    max_spread_bps: float = Field(gt=0)
+    volatility_multiplier: float = Field(ge=0)
+
+
+class OrderSizeSettings(BaseModel):
+    base_order_size: float = Field(gt=0)
+    min_order_size: float = Field(gt=0)
+    max_order_size: float = Field(gt=0)
+    ladder_levels: int = Field(ge=1, le=50)
+    ladder_size_multiplier: float = Field(gt=0)
+
+
+class InventorySettings(BaseModel):
+    target_base_ratio: float = Field(ge=0, le=1)
+    skew_intensity: float = Field(ge=0)
+    max_asset_exposure: float = Field(gt=0)
+    alert_threshold_ratio: float = Field(gt=0, le=1)
+
+
+class RiskSettings(BaseModel):
+    max_position_notional: float = Field(gt=0)
+    max_total_exposure: float = Field(gt=0)
+    max_order_notional: float = Field(gt=0)
+    max_open_orders: int = Field(ge=1)
+    max_daily_loss: float = Field(gt=0)
+    circuit_breaker_error_threshold: int = Field(ge=1)
+    circuit_breaker_cooldown_seconds: int = Field(ge=1)
+
+
+class ExchangeSettings(BaseModel):
+    enabled_exchanges: list[str]
+    default_timeout_seconds: float = Field(gt=0)
+    max_reconnect_delay_seconds: float = Field(gt=0)
+    heartbeat_interval_seconds: float = Field(gt=0)
+
+
+class LiquiditySettings(BaseModel):
+    depth_levels: int = Field(ge=1, le=200)
+    imbalance_threshold: float = Field(gt=0, le=1)
+    min_top_of_book_depth: float = Field(ge=0)
+
+
+class AlertSettings(BaseModel):
+    enabled_channels: list[str]
+    min_severity: Literal["info", "warning", "critical", "emergency"]
+    telegram_enabled: bool = True
+
+
+class RuntimeConfig(BaseModel):
+    spread: SpreadSettings
+    order_size: OrderSizeSettings
+    inventory: InventorySettings
+    risk: RiskSettings
+    exchange: ExchangeSettings
+    liquidity: LiquiditySettings
+    alert: AlertSettings
+
+
+def default_runtime_config() -> RuntimeConfig:
+    return RuntimeConfig(
+        spread=SpreadSettings(base_spread_bps=20, min_spread_bps=5, max_spread_bps=200, volatility_multiplier=1.5),
+        order_size=OrderSizeSettings(base_order_size=0.01, min_order_size=0.001, max_order_size=1.0, ladder_levels=3, ladder_size_multiplier=1.25),
+        inventory=InventorySettings(target_base_ratio=0.5, skew_intensity=0.75, max_asset_exposure=100000, alert_threshold_ratio=0.8),
+        risk=RiskSettings(max_position_notional=100000, max_total_exposure=250000, max_order_notional=25000, max_open_orders=100, max_daily_loss=10000, circuit_breaker_error_threshold=5, circuit_breaker_cooldown_seconds=300),
+        exchange=ExchangeSettings(enabled_exchanges=["binance", "coinstore", "mexc", "gate", "bitmart", "kucoin"], default_timeout_seconds=10, max_reconnect_delay_seconds=30, heartbeat_interval_seconds=20),
+        liquidity=LiquiditySettings(depth_levels=20, imbalance_threshold=0.35, min_top_of_book_depth=0),
+        alert=AlertSettings(enabled_channels=["telegram", "dashboard"], min_severity="warning", telegram_enabled=True),
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

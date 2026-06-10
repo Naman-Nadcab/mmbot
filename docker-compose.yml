@@ -1,0 +1,117 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.development
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      SERVER_PORT: ${SERVER_PORT:-8000}
+    ports:
+      - "${SERVER_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - platform
+
+  market-maker-engine:
+    build:
+      context: .
+      dockerfile: docker/engine/Dockerfile
+    env_file:
+      - .env.development
+    environment:
+      COMPONENT_NAME: market-maker-engine
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - platform
+
+  market-data-engine:
+    build:
+      context: .
+      dockerfile: docker/engine/Dockerfile
+    env_file:
+      - .env.development
+    environment:
+      COMPONENT_NAME: market-data-engine
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - platform
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard/Dockerfile
+    networks:
+      - platform
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mmbot}
+      POSTGRES_USER: ${POSTGRES_USER:-mmbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_development_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - platform
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - platform
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - dashboard
+    networks:
+      - platform
+
+  monitoring:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - platform
+
+networks:
+  platform:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  prometheus-data:

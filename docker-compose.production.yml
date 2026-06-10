@@ -1,0 +1,62 @@
+services:
+  backend:
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID is required}
+      EXCHANGE_API_KEYS: ${EXCHANGE_API_KEYS:?EXCHANGE_API_KEYS is required}
+      EXCHANGE_API_SECRETS: ${EXCHANGE_API_SECRETS:?EXCHANGE_API_SECRETS is required}
+      APP_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVER_IP: ${SERVER_IP:-0.0.0.0}
+      SERVER_PORT: ${SERVER_PORT:-8000}
+
+  market-maker-engine:
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      COMPONENT_NAME: market-maker-engine
+      APP_ENV: production
+
+  market-data-engine:
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      COMPONENT_NAME: market-data-engine
+      APP_ENV: production
+
+  dashboard:
+    restart: unless-stopped
+
+  postgres:
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+
+  redis:
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+
+  monitoring:
+    restart: unless-stopped

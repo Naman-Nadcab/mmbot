@@ -1,0 +1,48 @@
+name: Security
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-checks:
+    name: Dependency and static security checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install security tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements.txt
+          python -m pip install bandit pip-audit
+
+      - name: Run Bandit security scan
+        run: bandit -r src scripts -x tests -ll
+
+      - name: Run dependency vulnerability audit
+        run: pip-audit --requirement requirements.txt --strict
+
+      - name: Verify committed files do not contain private key material
+        run: |
+          if grep -R --line-number --binary-files=without-match -E '-----BEGIN (RSA |OPENSSH |EC |DSA |PRIVATE )?PRIVATE KEY-----' . --exclude-dir=.git; then
+            echo 'Private key material found in repository.' >&2
+            exit 1
+          fi
