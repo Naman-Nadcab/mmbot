@@ -8,5 +8,6 @@ Repository-wide standards and planning artifacts.
 - `naming-conventions.md` - naming rules for code, data, infrastructure, and operations.
 - `roadmap.md` - phased development roadmap.
 - `bootstrap-report.md` - report for this foundation bootstrap.
+- `certification/deployment-and-certification-playbook.md` - production deployment, exchange sandbox, shadow, canary, and audit certification playbook.
 
 Domain docs live in `architecture/`, `api/`, `database/`, `deployment/`, `security/`, and `operations/`.
