@@ -63,7 +63,8 @@ for service in "${REQUIRED_SERVICES[@]}"; do
   check_service_running "$service"
 done
 
-curl --fail --silent --show-error --max-time 10 "$HEALTHCHECK_URL" >/tmp/mmbot-health-response.json
+mkdir -p .deploy/state
+curl --fail --silent --show-error --max-time 10 "$HEALTHCHECK_URL" > .deploy/state/latest-health-response.json
 printf 'api_health_url=%s
 ' "$HEALTHCHECK_URL"
 
