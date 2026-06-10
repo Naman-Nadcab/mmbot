@@ -14,7 +14,7 @@ The repository is organized around enterprise ownership boundaries.
 | `operations/` | Health checks, incident response, runbooks, SLOs. |
 | `scripts/` | Operational scripts with no business logic. |
 | `security/` | Secrets, RBAC, encryption, rate limits, emergency controls. |
-| `services/` | Service boundary placeholders and future application modules. |
+| `services/` | Service-specific assets; runtime Python packages live under `src/mmbot`. |
 
 ## Boundary Rules
 

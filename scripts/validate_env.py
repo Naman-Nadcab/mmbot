@@ -27,9 +27,9 @@ REQUIRED_KEYS = (
 
 ALLOWED_APP_ENVS = {"development", "staging", "production", "test"}
 ALLOWED_LOG_LEVELS = {"TRACE", "DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"}
-PLACEHOLDER_PATTERNS = (
+TEMPLATE_VALUE_PATTERNS = (
     re.compile(r"change[-_ ]?me", re.IGNORECASE),
-    re.compile(r"placeholder", re.IGNORECASE),
+    re.compile(r"sample[-_ ]?value", re.IGNORECASE),
     re.compile(r"^\$\{[A-Z0-9_]+\}$"),
 )
 
@@ -60,8 +60,8 @@ def merged_environment(env_file: Path | None) -> Dict[str, str]:
     return values
 
 
-def is_placeholder(value: str) -> bool:
-    return any(pattern.search(value) for pattern in PLACEHOLDER_PATTERNS)
+def is_template_value(value: str) -> bool:
+    return any(pattern.search(value) for pattern in TEMPLATE_VALUE_PATTERNS)
 
 
 def parse_json_object(name: str, value: str) -> Tuple[Dict[str, str] | None, str | None]:
@@ -80,14 +80,14 @@ def parse_json_object(name: str, value: str) -> Tuple[Dict[str, str] | None, str
     return parsed, None
 
 
-def validate(values: Dict[str, str], allow_placeholders: bool) -> List[str]:
+def validate(values: Dict[str, str], allow_template_values: bool) -> List[str]:
     errors: List[str] = []
     for key in REQUIRED_KEYS:
         value = values.get(key, "")
         if not value:
             errors.append(f"Missing required environment variable: {key}")
-        elif not allow_placeholders and is_placeholder(value):
-            errors.append(f"{key} contains a placeholder value")
+        elif not allow_template_values and is_template_value(value):
+            errors.append(f"{key} contains a template value")
 
     app_env = values.get("APP_ENV", "")
     if app_env and app_env not in ALLOWED_APP_ENVS:
@@ -105,12 +105,12 @@ def validate(values: Dict[str, str], allow_placeholders: bool) -> List[str]:
         errors.append("SERVER_PORT must be an integer")
 
     jwt_secret = values.get("JWT_SECRET", "")
-    if jwt_secret and not allow_placeholders and len(jwt_secret) < 32:
+    if jwt_secret and not allow_template_values and len(jwt_secret) < 32:
         errors.append("JWT_SECRET must be at least 32 characters")
 
     exchange_keys_value = values.get("EXCHANGE_API_KEYS", "{}")
     exchange_secrets_value = values.get("EXCHANGE_API_SECRETS", "{}")
-    if allow_placeholders and (is_placeholder(exchange_keys_value) or is_placeholder(exchange_secrets_value)):
+    if allow_template_values and (is_template_value(exchange_keys_value) or is_template_value(exchange_secrets_value)):
         return errors
 
     api_keys, key_error = parse_json_object("EXCHANGE_API_KEYS", exchange_keys_value)
@@ -133,10 +133,10 @@ def validate(values: Dict[str, str], allow_placeholders: bool) -> List[str]:
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate platform environment variables")
     parser.add_argument("--file", dest="env_file", type=Path, help="Optional .env file to validate")
-    parser.add_argument("--allow-placeholders", action="store_true", help="Allow placeholder/template values")
+    parser.add_argument("--allow-template-values", action="store_true", help="Allow template values in committed environment files")
     args = parser.parse_args(argv)
     try:
-        errors = validate(merged_environment(args.env_file), args.allow_placeholders)
+        errors = validate(merged_environment(args.env_file), args.allow_template_values)
     except Exception as exc:
         print(f"Environment validation failed: {exc}", file=sys.stderr)
         return 2

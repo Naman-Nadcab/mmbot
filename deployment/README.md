@@ -6,10 +6,10 @@ Docker and Compose foundations are provided for local and production-oriented de
 
 | Service | Purpose |
 | --- | --- |
-| `backend` | API/backend boundary placeholder. |
-| `market-maker-engine` | Engine boundary placeholder; no algorithms. |
-| `market-data-engine` | Market data boundary placeholder; no integrations. |
-| `dashboard` | Static admin dashboard placeholder. |
+| `backend` | FastAPI backend with health, exchange capability, and dynamic admin configuration APIs. |
+| `market-maker-engine` | Python engine runtime containing quote, ladder, spread, replacement, and protection logic. |
+| `market-data-engine` | Python engine runtime containing stream analytics, spread, volatility, liquidity, and distribution logic. |
+| `dashboard` | Static dashboard asset container served behind NGINX. |
 | `postgres` | Durable PostgreSQL state. |
 | `redis` | Ephemeral cache, queue, pub/sub, counters. |
 | `nginx` | Reverse proxy foundation. |

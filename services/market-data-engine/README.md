@@ -1,3 +1,3 @@
 # Market Data Engine Boundary
 
-Reserved for future market data ingestion and normalization. No exchange connectivity or market data business logic is implemented.
+Market data analytics and distribution logic are implemented under `src/mmbot/engines/market_data` and use the shared exchange adapter framework.

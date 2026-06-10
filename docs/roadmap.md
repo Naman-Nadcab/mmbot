@@ -10,7 +10,7 @@ Adapter interfaces, secure credential loading, sandbox prototypes, rate limit ha
 Normalized market data models, sandbox WebSocket ingestion, freshness checks, Redis publication, persistence policy, and replay fixtures.
 
 ## Phase 4: Market Making
-Strategy interfaces, quote lifecycle state machines, simulation-first quote framework, pre-trade risk gate integration, and mocked order lifecycle tests. Production order placement remains disabled until approval.
+Strategy interfaces, quote lifecycle state machines, simulation-first quote framework, pre-trade risk gate integration, and adapter-contract order lifecycle tests. Production order placement remains disabled until approval.
 
 ## Phase 5: Inventory Management
 Inventory aggregation, position reconciliation, exposure/imbalance reporting, snapshot scheduling, and inventory-driven risk thresholds.

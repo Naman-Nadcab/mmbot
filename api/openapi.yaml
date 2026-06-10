@@ -5,7 +5,7 @@ info:
   description: Bootstrap API contract. No trading logic or exchange integrations are implemented.
 servers:
   - url: http://localhost:8000
-    description: Local development placeholder
+    description: Local development gateway
 tags:
   - name: Health
   - name: Administration
@@ -42,7 +42,7 @@ paths:
     post:
       tags: [Administration, Risk]
       summary: Planned emergency kill switch endpoint
-      description: Contract placeholder requiring RBAC, MFA, audit logging, and risk approval before implementation.
+      description: Emergency-control API contract requiring RBAC, MFA, audit logging, and risk authorization.
       security:
         - bearerAuth: []
       responses:

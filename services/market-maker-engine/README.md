@@ -1,3 +1,3 @@
 # Market Maker Engine Boundary
 
-Reserved for future market making orchestration. No algorithms, quote generation, order placement, or exchange integration are implemented.
+Market making runtime logic is implemented under `src/mmbot/engines/market_making` and exposed through the engine container command.

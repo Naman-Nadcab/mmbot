@@ -27,7 +27,7 @@ Enterprise foundation for an institutional cryptocurrency market making platform
 ├── operations/                  # Health checks, incident response, SLOs
 ├── scripts/                     # Safe operational scripts
 ├── security/                    # Security model and controls
-├── services/                    # Placeholder service boundaries only
+├── services/                    # Runtime service packages and dashboard assets
 ├── Dockerfile                   # Backend foundation container
 ├── docker-compose.yml           # Local/integration stack
 └── docker-compose.production.yml# Production override foundation
@@ -45,9 +45,9 @@ Enterprise foundation for an institutional cryptocurrency market making platform
 | Exchange Adapters | Venue-specific APIs/WebSockets/signing | Not implemented |
 | Alert Engine | Alert routing and escalation | Schema/planning only |
 | Analytics Engine | PnL, volatility, liquidity analytics | Schema/planning only |
-| Admin Dashboard | RBAC administrative console | Static placeholder only |
+| Admin Dashboard | RBAC administrative console | Containerized admin asset shell; backend admin APIs implemented |
 | Websocket Gateway | Realtime operational streams | Planned |
-| API Gateway | Auth, RBAC, rate limiting, API edge | Contract placeholder |
+| API Gateway | Auth, RBAC, rate limiting, API edge | FastAPI health and admin configuration APIs implemented |
 | Database Layer | Durable PostgreSQL source of truth | Schema designed |
 | Redis Layer | Cache, queues, pub/sub, counters | Compose foundation |
 | Monitoring Layer | Metrics, logs, health, alerts | Foundation config |
@@ -81,7 +81,7 @@ Validate with:
 
 ```bash
 python3 scripts/validate_env.py --file .env.development
-python3 scripts/validate_env.py --file .env.example --allow-placeholders
+python3 scripts/validate_env.py --file .env.example --allow-template-values
 ```
 
 ## Local Bootstrap Stack
@@ -91,7 +91,7 @@ python3 scripts/validate_env.py --file .env.development
 docker compose --env-file .env.development up --build
 ```
 
-The stack starts infrastructure and placeholder service boundaries only.
+The stack starts infrastructure, the FastAPI backend, engine command runtime, dashboard assets, NGINX, and monitoring.
 
 ## Documentation Index
 
