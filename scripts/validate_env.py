@@ -108,8 +108,13 @@ def validate(values: Dict[str, str], allow_placeholders: bool) -> List[str]:
     if jwt_secret and not allow_placeholders and len(jwt_secret) < 32:
         errors.append("JWT_SECRET must be at least 32 characters")
 
-    api_keys, key_error = parse_json_object("EXCHANGE_API_KEYS", values.get("EXCHANGE_API_KEYS", "{}"))
-    api_secrets, secret_error = parse_json_object("EXCHANGE_API_SECRETS", values.get("EXCHANGE_API_SECRETS", "{}"))
+    exchange_keys_value = values.get("EXCHANGE_API_KEYS", "{}")
+    exchange_secrets_value = values.get("EXCHANGE_API_SECRETS", "{}")
+    if allow_placeholders and (is_placeholder(exchange_keys_value) or is_placeholder(exchange_secrets_value)):
+        return errors
+
+    api_keys, key_error = parse_json_object("EXCHANGE_API_KEYS", exchange_keys_value)
+    api_secrets, secret_error = parse_json_object("EXCHANGE_API_SECRETS", exchange_secrets_value)
     if key_error:
         errors.append(key_error)
     if secret_error:
