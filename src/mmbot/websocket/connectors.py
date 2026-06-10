@@ -182,6 +182,10 @@ class VenueWebSocketConnector:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.reconstructor = OrderBookReconstructor()
         self._stopped = asyncio.Event()
+        self.connected = False
+        self.connection_attempts = 0
+        self.messages_received = 0
+        self.subscriptions_sent = 0
 
     def stop(self) -> None:
         self._stopped.set()
@@ -190,16 +194,23 @@ class VenueWebSocketConnector:
         delay = 1.0
         while not self._stopped.is_set():
             try:
+                self.connection_attempts += 1
+                logger.info("websocket_connecting", extra={"venue": self.venue.value, "url": self.definition.websocket_url, "attempt": self.connection_attempts})
                 async with websockets.connect(self.definition.websocket_url, ping_interval=self.heartbeat_interval_seconds, ping_timeout=self.heartbeat_interval_seconds) as ws:
+                    self.connected = True
+                    logger.info("websocket_connected", extra={"venue": self.venue.value, "url": self.definition.websocket_url})
                     await self._subscribe(ws, subscriptions)
                     delay = 1.0
                     async for raw in ws:
                         message = json.loads(raw) if isinstance(raw, str) else {"binary": raw.hex()}
+                        self.messages_received += 1
+                        logger.info("message_received", extra={"venue": self.venue.value, "messages_received": self.messages_received})
                         if await self._gap_detected(message, subscriptions, recover_snapshot):
                             await self._subscribe(ws, subscriptions)
                             continue
                         await handler(message)
             except Exception as exc:
+                self.connected = False
                 logger.warning("venue_websocket_reconnect", extra={"venue": self.venue.value, "error": str(exc), "delay": delay})
                 await asyncio.sleep(delay)
                 delay = min(self.max_reconnect_delay_seconds, delay * 2)
@@ -210,6 +221,8 @@ class VenueWebSocketConnector:
             messages = payload if isinstance(payload, list) else [payload]
             for message in messages:
                 await ws.send(message if isinstance(message, str) else json.dumps(message, separators=(",", ":")))
+                self.subscriptions_sent += 1
+                logger.info("subscription_sent", extra={"venue": self.venue.value, "kind": subscription.kind.value, "symbol": subscription.symbol, "subscriptions_sent": self.subscriptions_sent})
 
     async def _gap_detected(self, message: dict[str, Any], subscriptions: list[StreamSubscription], recover_snapshot: Callable[[StreamSubscription], Awaitable[OrderBookSnapshot | None]] | None) -> bool:
         sequence, previous = self.codec.parse_sequence(self.venue, message)

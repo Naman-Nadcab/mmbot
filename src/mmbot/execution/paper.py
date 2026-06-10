@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -12,6 +13,8 @@ from mmbot.db import models
 from mmbot.execution.models import ExecutionOrderType, ExecutionSide, OrderIntent
 from mmbot.exchanges.types import OrderBookSnapshot
 from mmbot.reconciliation.engine import BalanceRecord, FillRecord, OrderRecord, PnlRecord, PositionRecord, ReconciliationSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,6 +69,7 @@ class PaperExecutionEngine:
         order = PaperOrder(intent=intent, status="ACKNOWLEDGED")
         self.open_orders[intent.client_order_id] = order
         await self._persist_order(order)
+        logger.info("paper_order_created", extra={"symbol": intent.symbol, "side": intent.side.value, "price": str(intent.price), "quantity": str(intent.quantity), "client_order_id": intent.client_order_id})
         if orderbook is not None:
             await self.simulate_fills(intent.symbol, orderbook)
         return order
@@ -180,6 +184,7 @@ class PaperExecutionEngine:
         self.fills.append(fill)
         await self._persist_trade(order, fill)
         await self._persist_position(order.intent.symbol)
+        logger.info("paper_fill_created", extra={"symbol": fill.symbol, "side": fill.side.value, "price": str(fill.price), "quantity": str(fill.quantity), "trade_id": fill.trade_id})
         return fill
 
     async def _ensure_exchange_account(self) -> uuid.UUID:
@@ -229,6 +234,7 @@ class PaperExecutionEngine:
             row.filled_quantity = order.filled_quantity
             row.average_fill_price = order.average_price
         await self.session.flush()
+        logger.info("db_insert_success", extra={"table": "orders", "client_order_id": order.intent.client_order_id, "status": order.status})
 
     async def _persist_trade(self, order: PaperOrder, fill: PaperFill) -> None:
         account_id = await self._ensure_exchange_account()
@@ -237,6 +243,7 @@ class PaperExecutionEngine:
         order_row = order_result.scalar_one()
         self.session.add(models.Trade(order_id=order_row.id, exchange_trade_id=fill.trade_id, exchange_account_id=account_id, trading_pair_id=pair_id, side=models.OrderSide(fill.side.value), price=fill.price, quantity=fill.quantity, fee_amount=fill.fee, fee_asset=self.account.quote_asset, traded_at=fill.executed_at, metadata_json={"mode": "paper"}))
         await self.session.flush()
+        logger.info("db_insert_success", extra={"table": "trades", "trade_id": fill.trade_id, "client_order_id": fill.client_order_id})
 
     async def _persist_position(self, symbol: str) -> None:
         account_id = await self._ensure_exchange_account()
@@ -255,3 +262,4 @@ class PaperExecutionEngine:
             row.unrealized_pnl = self.unrealized_pnl()
             row.mark_price = self.last_mark_price if self.last_mark_price else None
         await self.session.flush()
+        logger.info("db_insert_success", extra={"table": "positions", "symbol": symbol, "asset": self.account.base_asset})

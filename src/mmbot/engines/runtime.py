@@ -91,6 +91,7 @@ class EngineDaemon:
                         },
                     )
                     await self._write_health('degraded')
+                    await self._publish_heartbeat(redis_ok=self.redis is not None, database_ok=False, status='degraded')
                     await self._wait_for_shutdown(min(30.0, max(1.0, self.consecutive_errors)))
         finally:
             await self._shutdown()
@@ -128,13 +129,13 @@ class EngineDaemon:
             await self.runtime.tick()
         if self.session is not None:
             await self.session.commit()
-        await self._publish_heartbeat(redis_ok=redis_ok, database_ok=database_ok)
+        await self._publish_heartbeat(redis_ok=redis_ok, database_ok=database_ok, status='healthy')
 
-    async def _publish_heartbeat(self, redis_ok: bool, database_ok: bool) -> None:
+    async def _publish_heartbeat(self, redis_ok: bool, database_ok: bool, status: str) -> None:
         if self.redis is None:
             return
         runtime_health = self.runtime.health() if self.runtime is not None else {}
-        payload = self._snapshot('healthy').__dict__ | {'redis_ok': redis_ok, 'database_ok': database_ok, 'runtime': runtime_health}
+        payload = self._snapshot(status).__dict__ | {'redis_ok': redis_ok, 'database_ok': database_ok, 'runtime': runtime_health}
         await self.redis.client.set(f'engine:health:{self.component_name}', json.dumps(payload, separators=(',', ':'), default=str), ex=max(120, int(self.heartbeat_interval_seconds * 3)))
 
     def _snapshot(self, status: str) -> EngineHealthSnapshot:

@@ -161,6 +161,7 @@ class MarketMakerRuntime:
         quotes = self.quote_engine.generate_quotes(market_state, inventory_state)
         self.metrics.increment("market_maker.quote_refreshes")
         self.metrics.increment("market_maker.quotes_generated", len(quotes))
+        logger.info("quote_generated", extra={"symbol": symbol, "quote_count": len(quotes), "mid_price": mid})
         await self._submit_quotes(symbol, quotes, orderbook)
         await self._persist_inventory(symbol, mid, balances)
 
@@ -187,6 +188,7 @@ class MarketMakerRuntime:
                     daily_pnl=float(self.paper.account.realized_pnl),
                 )
                 self.metrics.increment("risk.approvals")
+                logger.info("risk_approved", extra={"symbol": symbol, "side": quote.side, "price": quote.price, "quantity": quote.quantity})
                 decision = self.canary.evaluate(intent)
                 if not decision.accepted:
                     self.metrics.increment("market_maker.quote_rejections")
@@ -211,6 +213,7 @@ class MarketMakerRuntime:
         for balance in balances:
             self.session.add(models.InventorySnapshot(exchange_account_id=account_id, asset=balance.asset, total_balance=Decimal(str(balance.total)), available_balance=Decimal(str(balance.available)), reserved_balance=Decimal(str(balance.reserved)), valuation_asset=self.settings.PAPER_QUOTE_ASSET, valuation_price=Decimal(str(balance.price)), valuation_amount=Decimal(str(balance.total * balance.price)), captured_at=datetime.now(timezone.utc), metadata_json={"symbol": symbol, "mode": "paper"}))
         await self.session.flush()
+        logger.info("db_insert_success", extra={"table": "inventory_snapshots", "symbol": symbol, "asset_count": len(balances)})
 
     async def _maybe_reconcile(self) -> None:
         now = datetime.now(timezone.utc)
@@ -221,6 +224,7 @@ class MarketMakerRuntime:
         mismatches = self.reconciliation_engine.reconcile(snapshot, snapshot)
         self.metrics.increment("reconciliation.runs")
         self.metrics.increment("reconciliation.mismatches", len(mismatches))
+        logger.info("reconciliation_completed", extra={"mismatch_count": len(mismatches), "mode": self.mode.value})
         if mismatches:
             self.metrics.increment("reconciliation.alerts", len(mismatches))
             self.canary.activate_shutdown("reconciliation_mismatch")

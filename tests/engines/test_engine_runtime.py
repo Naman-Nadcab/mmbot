@@ -47,6 +47,7 @@ def _settings(redis_url: str) -> Settings:
         TELEGRAM_CHAT_ID="chat",
         EXCHANGE_API_KEYS={"binance": "key"},
         EXCHANGE_API_SECRETS={"binance": "secret"},
+        MARKET_DATA_CONNECT_ON_START=False,
     )
 
 

@@ -128,6 +128,10 @@ class MarketDataRuntime:
         self.active_subscriptions = 0
         self.reconnect_count = 0
         self.sequence_gaps = 0
+        self.redis_publish_count = 0
+        self.db_insert_count = 0
+        self.last_publish_at: datetime | None = None
+        self.last_db_insert_at: datetime | None = None
         self._persist_counter = 0
         self._started = False
         self._pair_ids: dict[tuple[str, str], uuid.UUID] = {}
@@ -146,6 +150,7 @@ class MarketDataRuntime:
             self.active_subscriptions += len(subscriptions)
             self.connectors.append(connector)
             self.tasks.append(asyncio.create_task(self._run_connector(connector, subscriptions), name=f"market-data-{venue.value}"))
+            logger.info("market_data_subscription_registered", extra={"venue": venue.value, "subscriptions": [subscription.kind.value for subscription in subscriptions], "symbols": self.settings.MARKET_DATA_SYMBOLS})
         self.metrics.set_gauge("market_data.active_subscriptions", float(self.active_subscriptions))
 
     async def stop(self) -> None:
@@ -164,6 +169,7 @@ class MarketDataRuntime:
         self.metrics.set_gauge("market_data.active_subscriptions", float(self.active_subscriptions))
         self.metrics.set_gauge("market_data.sequence_gaps", float(self.sequence_gaps))
         self.metrics.set_gauge("market_data.reconnect_count", float(self.reconnect_count))
+        self.validate_health()
 
     def health(self) -> dict[str, object]:
         return {
@@ -171,9 +177,33 @@ class MarketDataRuntime:
             "last_message_timestamp": {key: value.isoformat() for key, value in self.last_message_at.items()},
             "reconnect_count": self.reconnect_count,
             "sequence_gaps": self.sequence_gaps,
-            "websocket_state": "active" if self.tasks else "disabled",
+            "connector_tasks_total": len(self.tasks),
+            "connector_tasks_running": sum(1 for task in self.tasks if not task.done()),
+            "connector_tasks_failed": sum(1 for task in self.tasks if task.done() and not task.cancelled()),
+            "redis_publish_count": self.redis_publish_count,
+            "last_publish_timestamp": self.last_publish_at.isoformat() if self.last_publish_at else None,
+            "db_insert_count": self.db_insert_count,
+            "last_db_insert_timestamp": self.last_db_insert_at.isoformat() if self.last_db_insert_at else None,
+            "websocket_state": "active" if self.tasks and all(not task.done() for task in self.tasks) else "disabled",
             "metrics": self.metrics.snapshot(),
         }
+
+    def validate_health(self) -> None:
+        if not self.settings.MARKET_DATA_CONNECT_ON_START:
+            return
+        if self.active_subscriptions <= 0:
+            raise RuntimeError("market data has no active subscriptions")
+        if not self.tasks:
+            raise RuntimeError("market data has no connector tasks")
+        failed_tasks = [task.get_name() for task in self.tasks if task.done()]
+        if failed_tasks:
+            raise RuntimeError(f"market data connector tasks stopped: {failed_tasks}")
+        if not any(connector.connected for connector in self.connectors):
+            raise RuntimeError("market data has no active websocket connections")
+        if not self.last_message_at:
+            raise RuntimeError("market data has not received any websocket messages")
+        if self.redis_publish_count <= 0:
+            raise RuntimeError("market data has not published any Redis market data")
 
     def _subscriptions(self, venue: ExecutionVenue) -> list[StreamSubscription]:
         subscriptions: list[StreamSubscription] = []
@@ -207,6 +237,7 @@ class MarketDataRuntime:
         self.last_message_at[key] = datetime.now(timezone.utc)
         self.metrics.increment("market_data.messages")
         self.metrics.set_gauge("market_data.active_subscriptions", float(self.active_subscriptions))
+        logger.info("message_normalized", extra={"venue": venue.value, "symbol": symbol, "kind": kind})
         if kind == "ticker":
             await self._publish(f"marketdata:ticker:{venue.value}:{symbol}", asdict(payload))
             await self._maybe_persist_ticker(payload)
@@ -229,6 +260,10 @@ class MarketDataRuntime:
     async def _publish(self, channel: str, payload: dict[str, Any]) -> None:
         await self.bus.cache.set_json(f"latest:{channel}", payload, ttl_seconds=300)
         await self.bus.pubsub.publish(channel, payload)
+        self.redis_publish_count += 1
+        self.last_publish_at = datetime.now(timezone.utc)
+        self.metrics.increment("market_data.redis_publish_success")
+        logger.info("redis_publish_success", extra={"channel": channel, "publish_count": self.redis_publish_count})
 
     async def _ensure_trading_pair(self, exchange: str, symbol: str) -> uuid.UUID | None:
         if self.session is None:
@@ -255,6 +290,9 @@ class MarketDataRuntime:
             row = models.MarketData(exchange_name=ticker.exchange, trading_pair_id=pair_id, data_type="ticker", bid_price=ticker.bid_price, bid_size=ticker.bid_size, ask_price=ticker.ask_price, ask_size=ticker.ask_size, last_price=ticker.last_price, volume_24h=ticker.volume_24h, source_timestamp=ticker.source_timestamp, payload=asdict(ticker))
             self.session.add(row)
             await self.session.flush()
+            self.db_insert_count += 1
+            self.last_db_insert_at = datetime.now(timezone.utc)
+            logger.info("db_insert_success", extra={"table": "market_data", "exchange": ticker.exchange, "symbol": ticker.symbol})
 
     async def _maybe_persist_orderbook_metrics(self, orderbook: OrderBookSnapshot, analytics: Any, spread: Any) -> None:
         self._persist_counter += 1
@@ -264,6 +302,9 @@ class MarketDataRuntime:
         if pair_id is not None:
             self.session.add(models.LiquidityMetric(exchange_name=orderbook.exchange, trading_pair_id=pair_id, spread_bps=spread.spread_bps, top_of_book_depth=analytics.top_of_book_depth, depth_1pct=analytics.depth_1pct, depth_5pct=analytics.depth_5pct, imbalance_ratio=analytics.imbalance_ratio, captured_at=orderbook.source_timestamp, metadata_json={"mode": "paper"}))
             await self.session.flush()
+            self.db_insert_count += 1
+            self.last_db_insert_at = datetime.now(timezone.utc)
+            logger.info("db_insert_success", extra={"table": "liquidity_metrics", "exchange": orderbook.exchange, "symbol": orderbook.symbol})
 
     async def _maybe_persist_volatility(self, kline: Kline, volatility: float) -> None:
         self._persist_counter += 1
@@ -273,3 +314,6 @@ class MarketDataRuntime:
         if pair_id is not None:
             self.session.add(models.VolatilityMetric(exchange_name=kline.exchange, trading_pair_id=pair_id, window_seconds=60, realized_volatility=volatility, high_price=kline.high_price, low_price=kline.low_price, open_price=kline.open_price, close_price=kline.close_price, captured_at=kline.close_time, metadata_json={"interval": kline.interval}))
             await self.session.flush()
+            self.db_insert_count += 1
+            self.last_db_insert_at = datetime.now(timezone.utc)
+            logger.info("db_insert_success", extra={"table": "volatility_metrics", "exchange": kline.exchange, "symbol": kline.symbol})
