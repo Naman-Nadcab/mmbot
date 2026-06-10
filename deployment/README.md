@@ -29,6 +29,14 @@ python3 scripts/validate_env.py --file .env.production
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up --build -d
 ```
 
-## Required Before Production Business Logic
+## CI/CD Deployment
 
-Add CI/CD, vulnerability scans, migration automation, TLS, network segmentation, backup/restore, secret manager integration, image signing, and deployment rollback procedures.
+Production deployment is automated through GitHub Actions on pushes to `main`.
+
+- VPS setup: `docs/deployment/vps-setup-guide.md`
+- GitHub Secrets and Variables: `docs/cicd/github-secrets-configuration.md`
+- Deployment playbook: `docs/certification/deployment-and-certification-playbook.md`
+
+## Remaining Production Hardening
+
+Complete TLS, network segmentation, backup restore drills, secret manager integration, image signing, and production infrastructure validation before live trading.

@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
-from mmbot.execution.models import ExecutionVenue
 from mmbot.execution.specs import SigningStyle
 
 

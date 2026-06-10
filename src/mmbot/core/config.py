@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     APP_ENV: AppEnv = "development"
     LOG_LEVEL: str = "INFO"
-    SERVER_IP: str = "0.0.0.0"
+    SERVER_IP: str = "127.0.0.1"
     SERVER_PORT: int = 8000
     DATABASE_URL: str
     REDIS_URL: str

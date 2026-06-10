@@ -96,7 +96,9 @@ class IPAllowlistMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         if self.networks:
-            client_ip = ipaddress.ip_address(request.client.host if request.client else "0.0.0.0")
+            if request.client is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="client address unavailable")
+            client_ip = ipaddress.ip_address(request.client.host)
             if not any(client_ip in network for network in self.networks):
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ip not allowed")
         return await call_next(request)

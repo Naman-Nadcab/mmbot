@@ -4,7 +4,6 @@ import math
 import statistics
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 
 from mmbot.core.config import LiquiditySettings
 from mmbot.db import models

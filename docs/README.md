@@ -9,5 +9,7 @@ Repository-wide standards and planning artifacts.
 - `roadmap.md` - phased development roadmap.
 - `bootstrap-report.md` - report for this foundation bootstrap.
 - `certification/deployment-and-certification-playbook.md` - production deployment, exchange sandbox, shadow, canary, and audit certification playbook.
+- `deployment/vps-setup-guide.md` - VPS setup procedure for automated deployments.
+- `cicd/github-secrets-configuration.md` - GitHub Secrets and Variables required for CI/CD.
 
 Domain docs live in `architecture/`, `api/`, `database/`, `deployment/`, `security/`, and `operations/`.
