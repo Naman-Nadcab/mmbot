@@ -39,8 +39,7 @@ class TelegramNotifier:
 
     async def send(self, alert: AlertMessage) -> DeliveryResult:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        text = f"[{alert.severity.value.upper()}] {alert.title}
-{alert.body}"
+        text = f"[{alert.severity.value.upper()}] {alert.title}\n{alert.body}"
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(url, json={"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True})
         return DeliveryResult("telegram", response.status_code < 400, response.text[:500])
@@ -51,8 +50,7 @@ class DiscordNotifier:
         self.webhook_url = webhook_url
 
     async def send(self, alert: AlertMessage) -> DeliveryResult:
-        payload = {"content": f"**[{alert.severity.value.upper()}] {alert.title}**
-{alert.body}"}
+        payload = {"content": f"**[{alert.severity.value.upper()}] {alert.title}**\n{alert.body}"}
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(self.webhook_url, json=payload)
         return DeliveryResult("discord", response.status_code < 400, response.text[:500])
@@ -118,6 +116,5 @@ class AlertEscalationPolicy:
         key = alert.title
         self.failures[key] = self.failures.get(key, 0) + len(failed)
         if self.failures[key] >= self.critical_after_failures and alert.severity in {AlertSeverity.info, AlertSeverity.warning}:
-            return AlertMessage(AlertSeverity.critical, alert.title, f"Escalated after delivery failures.
-{alert.body}", alert.metadata)
+            return AlertMessage(AlertSeverity.critical, alert.title, f"Escalated after delivery failures.\n{alert.body}", alert.metadata)
         return alert

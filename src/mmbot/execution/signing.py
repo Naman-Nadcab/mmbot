@@ -58,8 +58,7 @@ def _sign_gate(method: str, path: str, params: dict[str, Any], body: dict[str, A
     query = urlencode({k: v for k, v in params.items() if v is not None})
     payload = json.dumps(body or {}, separators=(",", ":")) if body else ""
     hashed_payload = hashlib.sha512(payload.encode()).hexdigest()
-    message = "
-".join([method.upper(), path, query, hashed_payload, timestamp])
+    message = "\n".join([method.upper(), path, query, hashed_payload, timestamp])
     signature = hmac.new(credentials.api_secret.encode(), message.encode(), hashlib.sha512).hexdigest()
     return SignedRequest(path, params, body, {"KEY": credentials.api_key, "Timestamp": timestamp, "SIGN": signature})
 
