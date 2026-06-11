@@ -308,19 +308,22 @@ function handleStreamMessage(raw) {
 
 function renderAll() {
   renderPnl(); renderPositions(); renderOrders(); renderTrades(); renderRisk(); renderEngines();
-  renderExchanges(); renderInfrastructure(); renderReconciliation(); renderMode(); renderInventory(); renderCharts(); renderLatencyAndThroughput();
+  renderExchanges(); renderInfrastructure(); renderReconciliation(); renderMode(); renderInventory(); renderCharts(); renderLatencyAndThroughput(); renderDailyVolume();
 }
 
 function renderPnl() {
   const pnl = state.data.pnl;
   $('pnl-value').textContent = pnl ? formatMoney(pnl.total ?? pnl.unrealized ?? pnl.realized) : formatMoney(0);
   $('pnl-subtitle').textContent = pnl ? `realized ${formatMoney(pnl.realized)} / unrealized ${formatMoney(pnl.unrealized)}` : 'realized / unrealized';
+  $('unrealized-pnl-value').textContent = pnl ? formatMoney(pnl.unrealized) : formatMoney(0);
 }
 
 function renderInventory() {
   const inv = state.data.inventory;
   $('inventory-exposure').textContent = inv ? formatMoney(inv.exposure_notional ?? inv.total_notional) : formatMoney(0);
   $('inventory-subtitle').textContent = inv ? `${(inv.items || []).length} inventory snapshots` : '0 inventory snapshots';
+  const items = inv?.items || [];
+  $('inventory-detail').innerHTML = items.length ? items.slice(0, 8).map((item) => stackItem(item.asset, `${formatNumber(item.total_balance)} / ${formatMoney(item.valuation_amount)}`)).join('') : stackItem('Inventory', 'No records returned');
 }
 
 function renderMode(config) {
@@ -346,11 +349,16 @@ function renderEngines() {
   const entries = Object.entries(engines || {});
   $('engine-health').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value?.status || value?.health_status || JSON.stringify(value))).join('') : stackItem('Engine Health', 'No engine health records returned');
   $('engine-updated').textContent = entries.length ? 'Backend state' : 'No engine health records';
+  const allHealthy = entries.length && entries.every(([, value]) => String(value?.status || '').includes('healthy'));
+  if (entries.length) setPill('api-status', allHealthy ? 'Engines healthy' : 'Engines degraded', allHealthy ? 'ok' : 'warn');
 }
 
 function renderExchanges() {
   const entries = Object.entries(state.data.exchanges || {});
   $('exchange-connectivity').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value.status || value.detail || JSON.stringify(value))).join('') : stackItem('Exchanges', 'No exchange state returned');
+  const connected = entries.filter(([, value]) => String(value.status || '').includes('connected')).length;
+  $('exchange-summary').textContent = entries.length ? `${connected}/${entries.length} exchanges` : 'Exchanges loading';
+  $('exchange-summary').className = `status-chip ${connected ? 'ok' : 'neutral'}`;
 }
 
 function renderPositions() {
@@ -371,6 +379,7 @@ function renderRisk() {
   const risk = state.data.riskEvents || [];
   $('risk-count').textContent = String(risk.length);
   $('risk-body').innerHTML = rows(risk, 4, (r) => `<tr><td>${esc(r.severity)}</td><td>${esc(r.event_type || r.type)}</td><td>${esc(r.message)}</td><td>${esc(r.occurred_at || r.time)}</td></tr>`);
+  setPill('risk-summary', risk.length ? `${risk.length} risk events` : 'Risk normal', risk.some((r) => String(r.severity).includes('critical')) ? 'bad' : risk.length ? 'warn' : 'ok');
 }
 function renderReconciliation() {
   setPill('reconciliation-status', state.data.reconciliationStatus || 'No reconciliation state', String(state.data.reconciliationStatus || '').includes('ok') ? 'ok' : 'neutral');
@@ -409,21 +418,40 @@ function sampleThroughput(payload) {
   pushSample(state.history.marketMessages, { value: Number(counters['market_data.messages'] || 0), time: Date.now() });
 }
 function pushSample(series, value) { if (typeof value === 'object' || Number.isFinite(value)) { series.push(value); while (series.length > 40) series.shift(); } }
-function renderCharts() { renderBarChart('pnl-chart', state.history.pnl, ''); renderBarChart('inventory-chart', state.history.inventory, 'inventory'); }
-function renderBarChart(id, values, cls) {
+function renderCharts() { renderAreaChart('pnl-chart', state.history.pnl, ''); renderAreaChart('inventory-chart', state.history.inventory, 'inventory'); renderSparkline('unrealized-chart', state.history.pnl); renderSparkline('market-latency-chart', latencySeries('market')); renderSparkline('redis-latency-chart', latencySeries('redis')); renderSparkline('db-latency-chart', latencySeries('db')); renderSparkline('throughput-chart', throughputSeries()); }
+function renderAreaChart(id, values, cls) {
   const el = $(id);
-  const max = Math.max(...values.map((v) => Math.abs(v)), 1);
-  el.innerHTML = values.length ? values.map((v) => `<div class="bar ${cls}" title="${formatNumber(v)}" style="height:${Math.max(4, Math.abs(v) / max * 100)}%"></div>`).join('') : '<div class="empty">No chart samples yet</div>';
+  if (!values.length) { el.innerHTML = '<div class="empty">No chart samples yet</div>'; return; }
+  const points = chartPoints(values, 100, 44);
+  const line = points.map((p) => `${p.x},${p.y}`).join(' ');
+  const area = `0,48 ${line} 100,48`;
+  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 100 50" preserveAspectRatio="none"><polygon class="chart-area ${cls}" points="${area}"></polygon><polyline class="chart-area ${cls}" fill="none" points="${line}"></polyline></svg>`;
+}
+function renderSparkline(id, values) {
+  const el = $(id);
+  if (!values.length) { el.innerHTML = ''; return; }
+  const line = chartPoints(values, 100, 34).map((p) => `${p.x},${p.y}`).join(' ');
+  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 100 36" preserveAspectRatio="none"><polyline class="spark-path" points="${line}"></polyline></svg>`;
+}
+function chartPoints(values, width, height) {
+  const nums = values.map((v) => Number(v)).filter(Number.isFinite);
+  const min = Math.min(...nums, 0);
+  const max = Math.max(...nums, 1);
+  const spread = max - min || 1;
+  return nums.map((value, index) => ({ x: nums.length === 1 ? width : index / (nums.length - 1) * width, y: height - ((value - min) / spread * (height - 4)) + 2 }));
 }
 function renderLatencyAndThroughput() {
-  $('redis-latency').textContent = `${formatNumber(state.data.infrastructure.redis_latency_ms || 0)} ms`;
-  $('db-latency').textContent = `${formatNumber(state.data.infrastructure.database_latency_ms || 0)} ms`;
+  const redisLatency = Number(state.data.infrastructure.redis_latency_ms || 0);
+  const dbLatency = Number(state.data.infrastructure.database_latency_ms || 0);
+  $('redis-latency').textContent = `${formatNumber(redisLatency)} ms`;
+  $('db-latency').textContent = `${formatNumber(dbLatency)} ms`;
   const engines = state.data.engines || {};
   const dataEngine = engines['market-data-engine'] || {};
   const runtime = dataEngine.runtime || {};
   const lastTimes = Object.values(runtime.last_message_timestamp || {});
   const latest = lastTimes.length ? Math.max(...lastTimes.map((value) => Date.parse(value)).filter(Number.isFinite)) : 0;
-  $('market-latency').textContent = latest ? `${formatNumber(Date.now() - latest)} ms` : '0 ms';
+  const marketLatency = latest ? Date.now() - latest : 0;
+  $('market-latency').textContent = `${formatNumber(marketLatency)} ms`;
   const series = state.history.marketMessages;
   const previous = series[series.length - 2];
   const current = series[series.length - 1];
@@ -431,7 +459,14 @@ function renderLatencyAndThroughput() {
   $('message-throughput').textContent = `${formatNumber(throughput)}/s`;
   const uptimes = Object.values(engines).map((engine) => Number(engine?.uptime_seconds || 0)).filter(Number.isFinite);
   $('engine-uptime').textContent = formatDuration(Math.max(0, ...uptimes));
+  pushSample(state.history.redisLatency = state.history.redisLatency || [], redisLatency);
+  pushSample(state.history.dbLatency = state.history.dbLatency || [], dbLatency);
+  pushSample(state.history.marketLatency = state.history.marketLatency || [], marketLatency);
 }
+
+function latencySeries(kind) { return state.history[`${kind}Latency`] || []; }
+function throughputSeries() { const series = state.history.marketMessages; return series.map((item, index) => index ? Math.max(0, item.value - series[index - 1].value) / Math.max(1, (item.time - series[index - 1].time) / 1000) : 0); }
+function renderDailyVolume() { const volume = (state.data.trades || []).reduce((total, trade) => total + Number(trade.price || 0) * Number(trade.quantity || 0), 0); $('daily-volume').textContent = formatMoney(volume); }
 
 function reconciliationRows(payload) {
   const mismatches = payload.mismatches || payload.items || [];
