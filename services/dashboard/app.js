@@ -1,6 +1,6 @@
 const state = {
   apiBase: localStorage.getItem('ops.apiBase') || '/api',
-  token: localStorage.getItem('ops.token') || '',
+  token: normalizeToken(localStorage.getItem('ops.token') || ''),
   wsUrl: localStorage.getItem('ops.wsUrl') || defaultWsUrl(),
   socket: null,
   wsReconnectTimer: null,
@@ -24,12 +24,34 @@ function defaultWsUrl() {
 
 function headers() {
   const h = { 'Accept': 'application/json' };
-  if (state.token) h.Authorization = `Bearer ${state.token}`;
+  if (state.token) {
+    console.info('jwt_auth_diagnostics', tokenDiagnostics('rest_authorization_header', state.token));
+    h.Authorization = `Bearer ${state.token}`;
+  }
   return h;
 }
 
 function normalizeToken(value) {
-  return String(value || '').trim().replace(/^Bearer\s+/i, '').trim();
+  return String(value || '')
+    .trim()
+    .replace(/^Bearer\s+/i, '')
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+}
+
+function tokenDiagnostics(stage, token) {
+  const value = String(token || '');
+  return {
+    stage,
+    length: value.length,
+    segments: value ? value.split('.').length : 0,
+    hasWhitespace: /\s/.test(value),
+    startsWithBearer: /^Bearer\s+/i.test(value),
+    hasWrappingQuotes: /^['"].*['"]$/.test(value),
+    prefix: value.slice(0, 8),
+    suffix: value.slice(-8)
+  };
 }
 
 function setPill(id, text, status = 'neutral') {
@@ -170,7 +192,10 @@ function connectWebSocket() {
   if (!state.wsUrl) return;
   try {
     const url = new URL(state.wsUrl, window.location.href);
-    if (state.token) url.searchParams.set('token', state.token);
+    if (state.token) {
+      console.info('jwt_auth_diagnostics', tokenDiagnostics('websocket_query_token', state.token));
+      url.searchParams.set('token', state.token);
+    }
     const socket = new WebSocket(url.toString());
     state.socket = socket;
     setPill('ws-status', 'WebSocket connecting', 'warn');
@@ -373,6 +398,7 @@ function init() {
     state.apiBase = $('api-base').value.trim() || '/api';
     state.token = normalizeToken($('bearer-token').value);
     $('bearer-token').value = state.token;
+    console.info('jwt_auth_diagnostics', tokenDiagnostics('save_token', state.token));
     localStorage.setItem('ops.apiBase', state.apiBase);
     localStorage.setItem('ops.token', state.token);
     refreshRest();
