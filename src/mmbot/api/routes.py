@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated
 
@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mmbot.api.dependencies import get_database, get_redis, get_session
 from mmbot.api.schemas import DOMAIN_MODELS, ConfigResponse, ConfigUpdateRequest, HealthResponse
-from mmbot.core.security import require_admin
+from mmbot.core.config import get_settings
+from mmbot.core.security import decode_token, require_admin, require_operations_access
 from mmbot.db import models
 from mmbot.db.repositories import AuditRepository, ConfigRepository
 from mmbot.db.session import Database
@@ -89,7 +90,7 @@ async def exchange_capabilities(_: Annotated[dict, Depends(require_admin)]) -> d
 
 
 @router.get("/operations/engines")
-async def operations_engines(redis: Annotated[RedisManager, Depends(get_redis)]) -> dict:
+async def operations_engines(redis: Annotated[RedisManager, Depends(get_redis)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
     engines: dict[str, object] = {}
     async for key in redis.client.scan_iter(match="engine:health:*"):
         name = str(key).split("engine:health:", 1)[-1]
@@ -98,7 +99,7 @@ async def operations_engines(redis: Annotated[RedisManager, Depends(get_redis)])
 
 
 @router.get("/operations/infrastructure")
-async def operations_infrastructure(database: Annotated[Database, Depends(get_database)], redis: Annotated[RedisManager, Depends(get_redis)]) -> dict:
+async def operations_infrastructure(database: Annotated[Database, Depends(get_database)], redis: Annotated[RedisManager, Depends(get_redis)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
     db_started = time.perf_counter()
     database_ok = await database.health_check()
     db_latency_ms = (time.perf_counter() - db_started) * 1000
@@ -114,7 +115,7 @@ async def operations_infrastructure(database: Annotated[Database, Depends(get_da
 
 
 @router.get("/operations/exchanges")
-async def operations_exchanges(redis: Annotated[RedisManager, Depends(get_redis)]) -> dict:
+async def operations_exchanges(redis: Annotated[RedisManager, Depends(get_redis)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
     data_health = _loads_json(await redis.client.get("engine:health:market-data-engine")) or {}
     runtime = data_health.get("runtime") or {}
     last_messages = runtime.get("last_message_timestamp") or {}
@@ -133,28 +134,28 @@ async def operations_exchanges(redis: Annotated[RedisManager, Depends(get_redis)
 
 
 @router.get("/operations/orders")
-async def operations_orders(session: Annotated[AsyncSession, Depends(get_session)], limit: int = 100) -> dict:
+async def operations_orders(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], limit: int = 100) -> dict:
     pairs = await _pair_map(session)
     result = await session.execute(select(models.Order).order_by(desc(models.Order.created_at)).limit(limit))
     return {"items": [_order_payload(row, pairs) for row in result.scalars().all()]}
 
 
 @router.get("/operations/trades")
-async def operations_trades(session: Annotated[AsyncSession, Depends(get_session)], limit: int = 100) -> dict:
+async def operations_trades(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], limit: int = 100) -> dict:
     pairs = await _pair_map(session)
     result = await session.execute(select(models.Trade).order_by(desc(models.Trade.traded_at)).limit(limit))
     return {"items": [_trade_payload(row, pairs) for row in result.scalars().all()]}
 
 
 @router.get("/operations/positions")
-async def operations_positions(session: Annotated[AsyncSession, Depends(get_session)]) -> dict:
+async def operations_positions(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
     pairs = await _pair_map(session)
     result = await session.execute(select(models.Position).order_by(desc(models.Position.updated_at)))
     return {"items": [_position_payload(row, pairs) for row in result.scalars().all()]}
 
 
 @router.get("/operations/inventory")
-async def operations_inventory(session: Annotated[AsyncSession, Depends(get_session)], limit: int = 100) -> dict:
+async def operations_inventory(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], limit: int = 100) -> dict:
     result = await session.execute(select(models.InventorySnapshot).order_by(desc(models.InventorySnapshot.captured_at)).limit(limit))
     items = [_inventory_payload(row) for row in result.scalars().all()]
     exposure = sum(float(item.get("valuation_amount") or 0) for item in items)
@@ -162,7 +163,7 @@ async def operations_inventory(session: Annotated[AsyncSession, Depends(get_sess
 
 
 @router.get("/operations/pnl")
-async def operations_pnl(session: Annotated[AsyncSession, Depends(get_session)]) -> dict:
+async def operations_pnl(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
     result = await session.execute(select(func.coalesce(func.sum(models.Position.realized_pnl), 0), func.coalesce(func.sum(models.Position.unrealized_pnl), 0)))
     realized, unrealized = result.one()
     realized_f = _float(realized)
@@ -171,13 +172,13 @@ async def operations_pnl(session: Annotated[AsyncSession, Depends(get_session)])
 
 
 @router.get("/operations/risk-events")
-async def operations_risk_events(session: Annotated[AsyncSession, Depends(get_session)], limit: int = 100) -> dict:
+async def operations_risk_events(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], limit: int = 100) -> dict:
     result = await session.execute(select(models.RiskEvent).order_by(desc(models.RiskEvent.occurred_at)).limit(limit))
     return {"items": [_risk_payload(row) for row in result.scalars().all()]}
 
 
 @router.get("/operations/reconciliation")
-async def operations_reconciliation(redis: Annotated[RedisManager, Depends(get_redis)]) -> dict:
+async def operations_reconciliation(redis: Annotated[RedisManager, Depends(get_redis)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
     health = _loads_json(await redis.client.get("engine:health:market-maker-engine"))
     counters = (((health or {}).get("runtime") or {}).get("metrics") or {}).get("counters") or {}
     mismatches = int(counters.get("reconciliation.mismatches", 0) or 0)
@@ -187,8 +188,53 @@ async def operations_reconciliation(redis: Annotated[RedisManager, Depends(get_r
     return {"status": status_value, "runs": runs, "mismatch_count": mismatches, "alert_count": alerts, "mismatches": []}
 
 
+@router.get("/admin/kill-switch/status")
+async def admin_kill_switch_status(redis: Annotated[RedisManager, Depends(get_redis)], _: Annotated[dict, Depends(require_admin)]) -> dict:
+    state = _loads_json(await redis.client.get("risk:kill_switch")) or {"active": False}
+    return state
+
+
+@router.post("/admin/kill-switch/enable")
+async def admin_kill_switch_enable(request: dict, redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_admin)]) -> dict:
+    reason = str(request.get("reason") or "operator_request")
+    state = {"active": True, "reason": reason, "actor": actor.get("sub"), "activated_at": datetime.now(timezone.utc).isoformat()}
+    await redis.client.set("risk:kill_switch", json.dumps(state, separators=(",", ":")))
+    session.add(models.RiskEvent(severity=models.RiskSeverity.critical, event_type="KILL_SWITCH_ACTIVATED", source_component="operations-api", message=reason, is_kill_switch_triggered=True, metadata_json={"actor": actor.get("sub")}))
+    return state
+
+
+@router.post("/admin/kill-switch/disable")
+async def admin_kill_switch_disable(redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_admin)]) -> dict:
+    await redis.client.delete("risk:kill_switch")
+    session.add(models.RiskEvent(severity=models.RiskSeverity.high, event_type="KILL_SWITCH_CLEARED", source_component="operations-api", message="operator_clear", metadata_json={"actor": actor.get("sub")}))
+    return {"active": False}
+
+
+@router.get("/operations/canary-limits")
+async def operations_canary_limits(_: Annotated[dict, Depends(require_operations_access)], settings=Depends(get_settings)) -> dict:
+    return {
+        "max_canary_notional": settings.MAX_CANARY_NOTIONAL,
+        "max_canary_position": settings.MAX_CANARY_POSITION,
+        "trading_mode": settings.TRADING_MODE,
+    }
+
+
 @router.websocket("/ws/operations")
 async def operations_stream(websocket: WebSocket) -> None:
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008)
+        return
+    try:
+        actor = decode_token(token, get_settings())
+        roles = set(actor.get("roles", []))
+        permissions = set(actor.get("permissions", []))
+        if not roles.intersection({"platform_admin", "risk_manager", "incident_responder", "read_only_analyst"}) and not permissions.intersection({"operations:read", "config:read", "risk:read"}):
+            await websocket.close(code=1008)
+            return
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     database: Database = websocket.app.state.database
     redis: RedisManager = websocket.app.state.redis
@@ -204,9 +250,10 @@ async def operations_stream(websocket: WebSocket) -> None:
 
 async def _send_operation_events(websocket: WebSocket, session: AsyncSession, redis: RedisManager, last_seen: dict[str, object]) -> None:
     pairs = await _pair_map(session)
-    engine_payload = (await operations_engines(redis))["engines"]
+    operations_actor: dict = {}
+    engine_payload = (await operations_engines(redis, operations_actor))["engines"]
     await websocket.send_text(json.dumps({"type": "engine_health", "payload": {"engines": engine_payload}}, default=str))
-    await websocket.send_text(json.dumps({"type": "exchange_connectivity", "payload": await operations_exchanges(redis)}, default=str))
+    await websocket.send_text(json.dumps({"type": "exchange_connectivity", "payload": await operations_exchanges(redis, operations_actor)}, default=str))
 
     maker_health = _loads_json(await redis.client.get("engine:health:market-maker-engine")) or {}
     data_health = _loads_json(await redis.client.get("engine:health:market-data-engine")) or {}
@@ -225,7 +272,7 @@ async def _send_operation_events(websocket: WebSocket, session: AsyncSession, re
 
     reconciliation_runs = _int_counter(counters.get("reconciliation.runs"))
     if reconciliation_runs > int(last_seen["reconciliation_runs"]):
-        await websocket.send_text(json.dumps({"type": "reconciliation_completed", "payload": await operations_reconciliation(redis)}, default=str))
+        await websocket.send_text(json.dumps({"type": "reconciliation_completed", "payload": await operations_reconciliation(redis, operations_actor)}, default=str))
         last_seen["reconciliation_runs"] = reconciliation_runs
 
     reconnect_count = _int_counter(data_counters.get("market_data.reconnect_count"))
@@ -262,9 +309,9 @@ async def _send_operation_events(websocket: WebSocket, session: AsyncSession, re
             known_risks.add(event["id"])
             break
 
-    positions = (await operations_positions(session))["items"]
-    inventory = await operations_inventory(session)
-    pnl = await operations_pnl(session)
+    positions = (await operations_positions(session, operations_actor))["items"]
+    inventory = await operations_inventory(session, operations_actor)
+    pnl = await operations_pnl(session, operations_actor)
     await websocket.send_text(json.dumps({"type": "positions", "payload": {"items": positions}}, default=str))
     await websocket.send_text(json.dumps({"type": "inventory", "payload": inventory}, default=str))
     await websocket.send_text(json.dumps({"type": "pnl", "payload": pnl}, default=str))

@@ -18,6 +18,7 @@ from mmbot.engines.market_making.runtime import MarketMakerRuntime
 from mmbot.execution.models import ExecutionOrderType, ExecutionSide, ExecutionVenue, OrderIntent, TimeInForce
 from mmbot.exchanges.types import OrderBookLevel, OrderBookSnapshot
 from mmbot.observability.metrics import RuntimeMetrics
+from mmbot.reconciliation.engine import PositionRecord, ReconciliationEngine, ReconciliationSnapshot
 from mmbot.redis.manager import CacheManager, EngineCommunicationLayer, PubSubFramework, RedisManager
 
 
@@ -67,6 +68,23 @@ async def _redis_server(reader, writer):
 
 
 _redis_server.store = {}
+
+
+class MemoryCache:
+    def __init__(self):
+        self.data = {}
+
+    async def set_json(self, key, value, ttl_seconds=None):
+        self.data[key] = value
+
+    async def get_json(self, key):
+        return self.data.get(key)
+
+
+class MemoryBus:
+    def __init__(self):
+        self.cache = MemoryCache()
+        self.pubsub = None
 
 
 def _settings(redis_url: str) -> Settings:
@@ -223,9 +241,88 @@ async def test_market_maker_flow_generates_risk_checks_paper_fills_and_reconcile
         assert snapshot.balances
         assert snapshot.positions
         await session.commit()
+        await runtime.stop()
         await session.close()
     finally:
         await redis.close()
         await database.close()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_market_maker_recovers_market_state_from_latest_redis_cache_after_restart():
+    settings = _settings("redis://localhost:6379/0")
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session = database.session_factory()
+        bus = MemoryBus()
+        await bus.cache.set_json("latest:marketdata:orderbook:binance:BTC/USDT", {"exchange": "binance", "symbol": "BTC/USDT", "bids": [{"price": 99999, "size": 5.0}], "asks": [{"price": 100001, "size": 5.0}], "source_timestamp": datetime.now(timezone.utc).isoformat(), "sequence": "1"})
+        await bus.cache.set_json("latest:marketdata:analytics:binance:BTC/USDT", {"spread": {"spread_bps": 0.2}, "liquidity": {"imbalance_ratio": 0.0}, "realized_volatility": 0.0})
+        runtime = MarketMakerRuntime(settings, session, bus, QuoteEngine(default_runtime_config().spread, default_runtime_config().order_size, default_runtime_config().inventory), RuntimeMetrics())
+        runtime.started = True
+        await runtime.tick()
+        assert runtime.metrics.counters.get("market_maker.quotes_generated", 0) > 0
+        await session.close()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_global_kill_switch_blocks_market_maker_quote_execution():
+    settings = _settings("redis://localhost:6379/0")
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session = database.session_factory()
+        bus = MemoryBus()
+        await bus.cache.set_json("risk:kill_switch", {"active": True, "reason": "certification_test"})
+        await bus.cache.set_json("latest:marketdata:orderbook:binance:BTC/USDT", {"exchange": "binance", "symbol": "BTC/USDT", "bids": [{"price": 99999, "size": 5.0}], "asks": [{"price": 100001, "size": 5.0}], "source_timestamp": datetime.now(timezone.utc).isoformat(), "sequence": "1"})
+        runtime = MarketMakerRuntime(settings, session, bus, QuoteEngine(default_runtime_config().spread, default_runtime_config().order_size, default_runtime_config().inventory), RuntimeMetrics())
+        runtime.started = True
+        await runtime.tick()
+        assert runtime.metrics.counters.get("risk.kill_switch_blocks", 0) == 1
+        assert runtime.metrics.counters.get("market_maker.quotes_generated", 0) == 0
+        assert runtime.canary.state.kill_switch_active is True
+        await session.close()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_paper_order_client_id_updates_single_database_order():
+    settings = _settings("redis://localhost:6379/0")
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with database.session() as session:
+            from mmbot.execution.paper import PaperExecutionEngine
+
+            paper = PaperExecutionEngine(session, Decimal("100000"), "BTC", "USDT")
+            intent = OrderIntent(ExecutionVenue.binance, "BTC/USDT", ExecutionSide.buy, ExecutionOrderType.limit, Decimal("0.01"), Decimal("100000"), "duplicate-client-id", TimeInForce.gtc)
+            await paper.place_order(intent)
+            await paper.place_order(intent)
+        async with database.session() as session:
+            order_count = await session.scalar(select(func.count()).select_from(models.Order))
+            assert order_count == 1
+    finally:
+        await database.close()
+
+
+def test_inventory_drift_and_reconciliation_mismatch_alert_validation():
+    mismatches = ReconciliationEngine().reconcile(
+        ReconciliationSnapshot(positions=[PositionRecord("BTC/USDT", "BTC", Decimal("1"), Decimal("100000"))]),
+        ReconciliationSnapshot(positions=[PositionRecord("BTC/USDT", "BTC", Decimal("2"), Decimal("200000"))]),
+    )
+    assert mismatches
+    metrics = RuntimeMetrics()
+    runtime = object.__new__(MarketMakerRuntime)
+    runtime.metrics = metrics
+    runtime.canary = type("Canary", (), {"activate_shutdown": lambda self, reason: setattr(self, "reason", reason)})()
+    MarketMakerRuntime._handle_reconciliation_mismatches(runtime, len(mismatches))
+    assert metrics.counters["reconciliation.alerts"] == len(mismatches)
+    assert runtime.canary.reason == "reconciliation_mismatch"

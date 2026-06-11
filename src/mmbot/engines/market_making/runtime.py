@@ -40,11 +40,11 @@ class MarketMakerRuntime:
         self.mode = LaunchMode(settings.TRADING_MODE)
         self.canary = CanaryController(
             CanaryPolicy(
-                max_position_notional=Decimal(str(config.risk.max_position_notional)),
+                max_position_notional=Decimal(str(min(config.risk.max_position_notional, settings.MAX_CANARY_POSITION))),
                 max_daily_loss=Decimal(str(config.risk.max_daily_loss)),
                 max_order_count=config.risk.max_open_orders,
-                max_inventory_notional=Decimal(str(config.inventory.max_asset_exposure)),
-                max_order_notional=Decimal(str(config.risk.max_order_notional)),
+                max_inventory_notional=Decimal(str(min(config.inventory.max_asset_exposure, settings.MAX_CANARY_POSITION))),
+                max_order_notional=Decimal(str(min(config.risk.max_order_notional, settings.MAX_CANARY_NOTIONAL))),
             ),
             CanaryState(self.mode),
         )
@@ -80,6 +80,10 @@ class MarketMakerRuntime:
 
     async def tick(self) -> None:
         await self.ensure_started()
+        if await self._kill_switch_active():
+            self.metrics.increment("risk.kill_switch_blocks")
+            return
+        await self._load_latest_market_state()
         for symbol in self.settings.MARKET_DATA_SYMBOLS:
             await self._quote_symbol(symbol)
         await self._maybe_reconcile()
@@ -109,6 +113,23 @@ class MarketMakerRuntime:
             "paper_fills": len(self.paper.fills),
             "metrics": self.metrics.snapshot(),
         }
+
+    async def _kill_switch_active(self) -> bool:
+        state = await self.bus.cache.get_json("risk:kill_switch")
+        if isinstance(state, dict) and state.get("active"):
+            reason = str(state.get("reason") or "kill_switch_active")
+            self.canary.activate_shutdown(reason)
+            logger.critical("kill_switch_active", extra={"reason": reason, "mode": self.mode.value})
+            return True
+        return False
+
+    async def _load_latest_market_state(self) -> None:
+        for exchange in self.settings.MARKET_DATA_EXCHANGES:
+            for symbol in self.settings.MARKET_DATA_SYMBOLS:
+                for kind in ("ticker", "orderbook", "analytics"):
+                    payload = await self.bus.cache.get_json(f"latest:marketdata:{kind}:{exchange}:{symbol}")
+                    if isinstance(payload, dict):
+                        await self.ingest_market_event(f"marketdata:{kind}:{exchange}:{symbol}", payload)
 
     async def _consume_market_data(self) -> None:
         if self.pubsub is None:
@@ -226,8 +247,11 @@ class MarketMakerRuntime:
         self.metrics.increment("reconciliation.mismatches", len(mismatches))
         logger.info("reconciliation_completed", extra={"mismatch_count": len(mismatches), "mode": self.mode.value})
         if mismatches:
-            self.metrics.increment("reconciliation.alerts", len(mismatches))
-            self.canary.activate_shutdown("reconciliation_mismatch")
+            self._handle_reconciliation_mismatches(len(mismatches))
+
+    def _handle_reconciliation_mismatches(self, mismatch_count: int) -> None:
+        self.metrics.increment("reconciliation.alerts", mismatch_count)
+        self.canary.activate_shutdown("reconciliation_mismatch")
 
     def _asset_balances(self, mid: float) -> list[AssetBalance]:
         base_total = float(self.paper.account.balances.get(self.settings.PAPER_BASE_ASSET, Decimal("0")))

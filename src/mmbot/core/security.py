@@ -30,3 +30,14 @@ def require_admin(credentials: HTTPAuthorizationCredentials = Depends(bearer_sch
     if "platform_admin" not in roles and "config:write" not in permissions:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="insufficient permissions")
     return payload
+
+
+def require_operations_access(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    payload = decode_token(credentials.credentials, settings)
+    permissions = set(payload.get("permissions", []))
+    roles = set(payload.get("roles", []))
+    allowed_roles = {"platform_admin", "risk_manager", "incident_responder", "read_only_analyst"}
+    allowed_permissions = {"operations:read", "config:read", "risk:read"}
+    if not roles.intersection(allowed_roles) and not permissions.intersection(allowed_permissions):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="insufficient permissions")
+    return payload

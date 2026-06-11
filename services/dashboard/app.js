@@ -97,6 +97,12 @@ async function refreshRest() {
     } catch (error) {
       logEvent('exchange_capabilities_unavailable', { error: error.message });
     }
+
+    try {
+      renderKillSwitch(await request('/admin/kill-switch/status'));
+    } catch (error) {
+      logEvent('kill_switch_status_unavailable', { error: error.message });
+    }
   }
 }
 
@@ -111,7 +117,8 @@ async function refreshOperations() {
     ['inventory', '/operations/inventory'],
     ['pnl', '/operations/pnl'],
     ['riskEvents', '/operations/risk-events'],
-    ['reconciliationPayload', '/operations/reconciliation']
+    ['reconciliationPayload', '/operations/reconciliation'],
+    ['canaryLimits', '/operations/canary-limits']
   ];
   for (const [key, path] of calls) {
     try {
@@ -128,6 +135,7 @@ async function refreshOperations() {
       else if (key === 'inventory') state.data.inventory = payload;
       else if (key === 'pnl') state.data.pnl = payload;
       else if (key === 'riskEvents') state.data.riskEvents = payload.items || [];
+      else if (key === 'canaryLimits') renderCanaryLimits(payload);
       else if (key === 'reconciliationPayload') {
         state.data.reconciliation = reconciliationRows(payload);
         state.data.reconciliationStatus = `${payload.status} (${payload.runs} runs)`;
@@ -147,7 +155,9 @@ function connectWebSocket() {
   localStorage.setItem('ops.wsUrl', state.wsUrl);
   if (!state.wsUrl) return;
   try {
-    const socket = new WebSocket(state.wsUrl);
+    const url = new URL(state.wsUrl, window.location.href);
+    if (state.token) url.searchParams.set('token', state.token);
+    const socket = new WebSocket(url.toString());
     state.socket = socket;
     setPill('ws-status', 'WebSocket connecting', 'warn');
     socket.onopen = () => { setPill('ws-status', 'WebSocket connected', 'ok'); logEvent('websocket_connected', { url: state.wsUrl }); };
@@ -274,6 +284,18 @@ function renderReconciliation() {
   $('reconciliation-body').innerHTML = rows(state.data.reconciliation, 4, (r) => `<tr><td>${esc(r.category)}</td><td>${esc(r.key)}</td><td>${esc(r.severity)}</td><td>${esc(r.message)}</td></tr>`);
 }
 
+function renderKillSwitch(payload) {
+  const active = Boolean(payload?.active);
+  setPill('kill-status', active ? `ACTIVE: ${payload.reason || 'unknown'}` : 'Inactive', active ? 'bad' : 'ok');
+  $('kill-switch').disabled = true;
+  $('kill-output').textContent = JSON.stringify(payload || { active: false }, null, 2);
+}
+
+function renderCanaryLimits(payload) {
+  const current = $('kill-output').textContent || '';
+  $('kill-output').textContent = `${current}\nCanary limits: ${JSON.stringify(payload || {}, null, 2)}`.trim();
+}
+
 function rows(items, cols, renderer) { return Array.isArray(items) && items.length ? items.map(renderer).join('') : emptyRow(cols); }
 function pageSlice(items, page) { const list = Array.isArray(items) ? items : []; const start = page.page * page.size; return list.slice(start, start + page.size); }
 function pageCount(items, page) { return Math.max(1, Math.ceil((Array.isArray(items) ? items.length : 0) / page.size)); }
@@ -342,7 +364,7 @@ function init() {
   $('trades-prev').addEventListener('click', () => changePage('trades', -1));
   $('trades-next').addEventListener('click', () => changePage('trades', 1));
   $('clear-log').addEventListener('click', () => { state.lastEvents = []; $('event-log').textContent = ''; });
-  $('kill-switch').addEventListener('click', () => { $('kill-output').textContent = 'Kill switch endpoint is not available from existing backend APIs.'; });
+  $('kill-switch').addEventListener('click', () => { logEvent('kill_switch_read_only', { message: 'Use authenticated admin API to enable or disable kill switch.' }); });
   renderAll(); refreshRest(); connectWebSocket(); setInterval(refreshRest, 10000);
 }
 

@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     PAPER_STARTING_CASH: float = 100000.0
     PAPER_BASE_ASSET: str = "BTC"
     PAPER_QUOTE_ASSET: str = "USDT"
+    MAX_CANARY_NOTIONAL: float = 5000.0
+    MAX_CANARY_POSITION: float = 2500.0
 
     @field_validator("LOG_LEVEL")
     @classmethod

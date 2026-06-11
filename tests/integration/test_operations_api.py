@@ -1,15 +1,17 @@
 import json
 import secrets
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import jwt
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from mmbot.api.dependencies import get_database, get_redis, get_session
 from mmbot.api.main import create_app
 from mmbot.api.routes import _send_operation_events
-from mmbot.core.config import Settings
+from mmbot.core.config import Settings, get_settings
 from mmbot.db import models
 from mmbot.db.models import Base
 from mmbot.db.session import Database
@@ -28,6 +30,10 @@ class MemoryRedisClient:
     async def set(self, key, value, ex=None):
         self.data[key] = value
         return True
+
+    async def delete(self, key):
+        self.data.pop(key, None)
+        return 1
 
     async def scan_iter(self, match=None):
         prefix = (match or "").replace("*", "")
@@ -63,9 +69,18 @@ def _settings() -> Settings:
     )
 
 
+def _token(settings: Settings) -> str:
+    return jwt.encode({"sub": "operator", "roles": ["read_only_analyst"], "permissions": ["operations:read"], "exp": int(time.time()) + 3600}, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
+
+def _admin_token(settings: Settings) -> str:
+    return jwt.encode({"sub": "admin", "roles": ["platform_admin"], "permissions": ["config:write"], "exp": int(time.time()) + 3600}, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
+
 @pytest.mark.asyncio
 async def test_operations_endpoints_return_real_state():
-    database = Database(_settings())
+    settings = _settings()
+    database = Database(settings)
     redis = MemoryRedisManager()
     async with database.engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -89,6 +104,7 @@ async def test_operations_endpoints_return_real_state():
     app = create_app()
     app.dependency_overrides[get_database] = lambda: database
     app.dependency_overrides[get_redis] = lambda: redis
+    app.dependency_overrides[get_settings] = lambda: settings
 
     async def override_session():
         async with session_factory() as session:
@@ -96,18 +112,29 @@ async def test_operations_endpoints_return_real_state():
 
     app.dependency_overrides[get_session] = override_session
 
+    auth_headers = {"Authorization": f"Bearer {_token(settings)}"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        assert (await client.get("/operations/engines")).json()["engines"]["market-maker-engine"]["status"] == "healthy"
-        assert len((await client.get("/operations/orders")).json()["items"]) == 1
-        assert len((await client.get("/operations/trades")).json()["items"]) == 1
-        assert len((await client.get("/operations/positions")).json()["items"]) == 1
-        assert len((await client.get("/operations/inventory")).json()["items"]) == 1
-        assert (await client.get("/operations/pnl")).json()["total"] == 5.0
-        assert len((await client.get("/operations/risk-events")).json()["items"]) == 1
-        assert (await client.get("/operations/reconciliation")).json()["status"] == "ok"
-        assert (await client.get("/operations/exchanges")).json()["exchanges"]["binance"]["status"] == "connected"
+        assert (await client.get("/operations/orders")).status_code == 401
+        assert (await client.get("/admin/kill-switch/status")).status_code == 401
+        assert (await client.get("/operations/engines", headers=auth_headers)).json()["engines"]["market-maker-engine"]["status"] == "healthy"
+        assert len((await client.get("/operations/orders", headers=auth_headers)).json()["items"]) == 1
+        assert len((await client.get("/operations/trades", headers=auth_headers)).json()["items"]) == 1
+        assert len((await client.get("/operations/positions", headers=auth_headers)).json()["items"]) == 1
+        assert len((await client.get("/operations/inventory", headers=auth_headers)).json()["items"]) == 1
+        assert (await client.get("/operations/pnl", headers=auth_headers)).json()["total"] == 5.0
+        assert len((await client.get("/operations/risk-events", headers=auth_headers)).json()["items"]) == 1
+        assert (await client.get("/operations/reconciliation", headers=auth_headers)).json()["status"] == "ok"
+        assert (await client.get("/operations/exchanges", headers=auth_headers)).json()["exchanges"]["binance"]["status"] == "connected"
+        canary_limits = (await client.get("/operations/canary-limits", headers=auth_headers)).json()
+        assert canary_limits["max_canary_notional"] > 0
+        assert canary_limits["max_canary_position"] > 0
+        admin_headers = {"Authorization": f"Bearer {_admin_token(settings)}"}
+        kill_state = (await client.post("/admin/kill-switch/enable", headers=admin_headers, json={"reason": "test"})).json()
+        assert kill_state["active"] is True
+        assert (await client.get("/admin/kill-switch/status", headers=admin_headers)).json()["active"] is True
+        assert (await client.post("/admin/kill-switch/disable", headers=admin_headers)).json()["active"] is False
 
-        infrastructure = (await client.get("/operations/infrastructure")).json()
+        infrastructure = (await client.get("/operations/infrastructure", headers=auth_headers)).json()
         assert infrastructure["database"] == "healthy"
         assert infrastructure["redis"] == "healthy"
         assert infrastructure["database_latency_ms"] >= 0
