@@ -230,6 +230,21 @@ async def operations_canary_limits(_: Annotated[dict, Depends(require_operations
 @router.websocket("/ws/operations")
 async def operations_stream(websocket: WebSocket) -> None:
     token = websocket.query_params.get("token")
+    logger.info(
+        "websocket_connection_attempt",
+        extra={
+            "path": websocket.url.path,
+            "route_registered": True,
+            "upgrade_header": websocket.headers.get("upgrade"),
+            "connection_header": websocket.headers.get("connection"),
+            "sec_websocket_key_present": websocket.headers.get("sec-websocket-key") is not None,
+            "token_present": token is not None,
+            "token_length": len(token or ""),
+            "token_segments": len((token or "").split(".")) if token else 0,
+            "token_prefix": (token or "")[:12],
+            "token_suffix": (token or "")[-12:],
+        },
+    )
     if not token:
         logger.warning("websocket_auth_failed", extra={"path": websocket.url.path, "reason": "missing_token"})
         await websocket.close(code=1008)

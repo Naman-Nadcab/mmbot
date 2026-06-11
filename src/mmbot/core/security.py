@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from mmbot.core.config import Settings, get_settings
 
-bearer_scheme = HTTPBearer(auto_error=True)
+bearer_scheme = HTTPBearer(auto_error=False)
 logger = logging.getLogger(__name__)
 
 
@@ -45,7 +45,15 @@ def decode_token(token: str, settings: Settings, request: Request | None = None,
     return payload
 
 
-def require_admin(request: Request, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+def _missing_credentials(request: Request, reason: str) -> HTTPException:
+    logger.warning("jwt_decode_failed", extra=_auth_metadata(request, None, request.headers.get("authorization")) | {"reason": reason})
+    return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token")
+
+
+def require_admin(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    if credentials is None:
+        raise _missing_credentials(request, "missing_or_malformed_authorization")
+    logger.info("jwt_auth_request", extra=_auth_metadata(request, credentials.credentials, request.headers.get("authorization")))
     payload = decode_token(credentials.credentials, settings, request, request.headers.get("authorization"))
     permissions = set(payload.get("permissions", []))
     roles = set(payload.get("roles", []))
@@ -55,7 +63,10 @@ def require_admin(request: Request, credentials: HTTPAuthorizationCredentials = 
     return payload
 
 
-def require_operations_access(request: Request, credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+def require_operations_access(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    if credentials is None:
+        raise _missing_credentials(request, "missing_or_malformed_authorization")
+    logger.info("jwt_auth_request", extra=_auth_metadata(request, credentials.credentials, request.headers.get("authorization")))
     payload = decode_token(credentials.credentials, settings, request, request.headers.get("authorization"))
     permissions = set(payload.get("permissions", []))
     roles = set(payload.get("roles", []))
