@@ -5,6 +5,7 @@ import logging
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -130,6 +131,9 @@ class MarketDataRuntime:
         self.sequence_gaps = 0
         self.redis_publish_count = 0
         self.db_insert_count = 0
+        self.market_data_rows_written = 0
+        self.liquidity_rows_written = 0
+        self.volatility_rows_written = 0
         self.last_publish_at: datetime | None = None
         self.last_db_insert_at: datetime | None = None
         self._persist_counter = 0
@@ -183,6 +187,9 @@ class MarketDataRuntime:
             "redis_publish_count": self.redis_publish_count,
             "last_publish_timestamp": self.last_publish_at.isoformat() if self.last_publish_at else None,
             "db_insert_count": self.db_insert_count,
+            "market_data_rows_written": self.market_data_rows_written,
+            "liquidity_rows_written": self.liquidity_rows_written,
+            "volatility_rows_written": self.volatility_rows_written,
             "last_db_insert_timestamp": self.last_db_insert_at.isoformat() if self.last_db_insert_at else None,
             "websocket_state": "active" if self.tasks and all(not task.done() for task in self.tasks) else "disabled",
             "metrics": self.metrics.snapshot(),
@@ -251,6 +258,7 @@ class MarketDataRuntime:
             await self.engine.distribute_orderbook(payload)
             await self._publish(f"marketdata:orderbook:{venue.value}:{symbol}", asdict(payload))
             await self._publish(f"marketdata:analytics:{venue.value}:{symbol}", {"spread": asdict(spread), "liquidity": asdict(analytics)})
+            await self._maybe_persist_orderbook(payload, spread)
             await self._maybe_persist_orderbook_metrics(payload, analytics, spread)
         elif kind == "kline":
             stats = self.engine.market_statistics(symbol, [], [payload])
@@ -285,35 +293,123 @@ class MarketDataRuntime:
         self._persist_counter += 1
         if self.session is None or self._persist_counter % self.settings.MARKET_DATA_PERSIST_EVERY_N_MESSAGES != 0:
             return
-        pair_id = await self._ensure_trading_pair(ticker.exchange, ticker.symbol)
-        if pair_id is not None:
-            row = models.MarketData(exchange_name=ticker.exchange, trading_pair_id=pair_id, data_type="ticker", bid_price=ticker.bid_price, bid_size=ticker.bid_size, ask_price=ticker.ask_price, ask_size=ticker.ask_size, last_price=ticker.last_price, volume_24h=ticker.volume_24h, source_timestamp=ticker.source_timestamp, payload=asdict(ticker))
+        await self._insert_market_data(
+            exchange=ticker.exchange,
+            symbol=ticker.symbol,
+            data_type="ticker",
+            source_timestamp=ticker.source_timestamp,
+            payload=asdict(ticker),
+            bid_price=ticker.bid_price,
+            bid_size=ticker.bid_size,
+            ask_price=ticker.ask_price,
+            ask_size=ticker.ask_size,
+            last_price=ticker.last_price,
+            volume_24h=ticker.volume_24h,
+        )
+
+    async def _maybe_persist_orderbook(self, orderbook: OrderBookSnapshot, spread: Any) -> None:
+        self._persist_counter += 1
+        if self.session is None or self._persist_counter % self.settings.MARKET_DATA_PERSIST_EVERY_N_MESSAGES != 0:
+            return
+        best_bid = max(orderbook.bids, key=lambda level: level.price) if orderbook.bids else None
+        best_ask = min(orderbook.asks, key=lambda level: level.price) if orderbook.asks else None
+        await self._insert_market_data(
+            exchange=orderbook.exchange,
+            symbol=orderbook.symbol,
+            data_type="order_book",
+            source_timestamp=orderbook.source_timestamp,
+            payload=asdict(orderbook),
+            bid_price=best_bid.price if best_bid else None,
+            bid_size=best_bid.size if best_bid else None,
+            ask_price=best_ask.price if best_ask else None,
+            ask_size=best_ask.size if best_ask else None,
+            last_price=spread.mid,
+            volume_24h=None,
+        )
+
+    async def _insert_market_data(
+        self,
+        exchange: str,
+        symbol: str,
+        data_type: str,
+        source_timestamp: datetime,
+        payload: dict[str, Any],
+        bid_price: float | None,
+        bid_size: float | None,
+        ask_price: float | None,
+        ask_size: float | None,
+        last_price: float | None,
+        volume_24h: float | None,
+    ) -> None:
+        logger.info("market_data_insert_attempt", extra={"table": "market_data", "exchange": exchange, "symbol": symbol, "data_type": data_type})
+        try:
+            pair_id = await self._ensure_trading_pair(exchange, symbol)
+            if pair_id is None:
+                raise RuntimeError("trading pair id unavailable")
+            row = models.MarketData(exchange_name=exchange, trading_pair_id=pair_id, data_type=data_type, bid_price=bid_price, bid_size=bid_size, ask_price=ask_price, ask_size=ask_size, last_price=last_price, volume_24h=volume_24h, source_timestamp=source_timestamp, payload=self._json_safe(payload))
             self.session.add(row)
             await self.session.flush()
             self.db_insert_count += 1
+            self.market_data_rows_written += 1
             self.last_db_insert_at = datetime.now(timezone.utc)
-            logger.info("db_insert_success", extra={"table": "market_data", "exchange": ticker.exchange, "symbol": ticker.symbol})
+            self.metrics.increment("market_data.rows_written")
+            logger.info("market_data_insert_success", extra={"table": "market_data", "exchange": exchange, "symbol": symbol, "data_type": data_type, "rows_written": self.market_data_rows_written})
+            logger.info("db_insert_success", extra={"table": "market_data", "exchange": exchange, "symbol": symbol, "data_type": data_type})
+        except Exception as exc:
+            logger.exception("market_data_insert_failed", extra={"table": "market_data", "exchange": exchange, "symbol": symbol, "data_type": data_type, "error": str(exc)})
+            raise
 
     async def _maybe_persist_orderbook_metrics(self, orderbook: OrderBookSnapshot, analytics: Any, spread: Any) -> None:
         self._persist_counter += 1
         if self.session is None or self._persist_counter % self.settings.MARKET_DATA_PERSIST_EVERY_N_MESSAGES != 0:
             return
-        pair_id = await self._ensure_trading_pair(orderbook.exchange, orderbook.symbol)
-        if pair_id is not None:
+        logger.info("liquidity_metrics_insert_attempt", extra={"table": "liquidity_metrics", "exchange": orderbook.exchange, "symbol": orderbook.symbol})
+        try:
+            pair_id = await self._ensure_trading_pair(orderbook.exchange, orderbook.symbol)
+            if pair_id is None:
+                raise RuntimeError("trading pair id unavailable")
             self.session.add(models.LiquidityMetric(exchange_name=orderbook.exchange, trading_pair_id=pair_id, spread_bps=spread.spread_bps, top_of_book_depth=analytics.top_of_book_depth, depth_1pct=analytics.depth_1pct, depth_5pct=analytics.depth_5pct, imbalance_ratio=analytics.imbalance_ratio, captured_at=orderbook.source_timestamp, metadata_json={"mode": "paper"}))
             await self.session.flush()
             self.db_insert_count += 1
+            self.liquidity_rows_written += 1
             self.last_db_insert_at = datetime.now(timezone.utc)
+            self.metrics.increment("liquidity.rows_written")
+            logger.info("liquidity_metrics_insert_success", extra={"table": "liquidity_metrics", "exchange": orderbook.exchange, "symbol": orderbook.symbol, "rows_written": self.liquidity_rows_written})
             logger.info("db_insert_success", extra={"table": "liquidity_metrics", "exchange": orderbook.exchange, "symbol": orderbook.symbol})
+        except Exception as exc:
+            logger.exception("liquidity_metrics_insert_failed", extra={"table": "liquidity_metrics", "exchange": orderbook.exchange, "symbol": orderbook.symbol, "error": str(exc)})
+            raise
 
     async def _maybe_persist_volatility(self, kline: Kline, volatility: float) -> None:
         self._persist_counter += 1
         if self.session is None or self._persist_counter % self.settings.MARKET_DATA_PERSIST_EVERY_N_MESSAGES != 0:
             return
-        pair_id = await self._ensure_trading_pair(kline.exchange, kline.symbol)
-        if pair_id is not None:
+        logger.info("volatility_metrics_insert_attempt", extra={"table": "volatility_metrics", "exchange": kline.exchange, "symbol": kline.symbol})
+        try:
+            pair_id = await self._ensure_trading_pair(kline.exchange, kline.symbol)
+            if pair_id is None:
+                raise RuntimeError("trading pair id unavailable")
             self.session.add(models.VolatilityMetric(exchange_name=kline.exchange, trading_pair_id=pair_id, window_seconds=60, realized_volatility=volatility, high_price=kline.high_price, low_price=kline.low_price, open_price=kline.open_price, close_price=kline.close_price, captured_at=kline.close_time, metadata_json={"interval": kline.interval}))
             await self.session.flush()
             self.db_insert_count += 1
+            self.volatility_rows_written += 1
             self.last_db_insert_at = datetime.now(timezone.utc)
+            self.metrics.increment("volatility.rows_written")
+            logger.info("volatility_metrics_insert_success", extra={"table": "volatility_metrics", "exchange": kline.exchange, "symbol": kline.symbol, "rows_written": self.volatility_rows_written})
             logger.info("db_insert_success", extra={"table": "volatility_metrics", "exchange": kline.exchange, "symbol": kline.symbol})
+        except Exception as exc:
+            logger.exception("volatility_metrics_insert_failed", extra={"table": "volatility_metrics", "exchange": kline.exchange, "symbol": kline.symbol, "error": str(exc)})
+            raise
+
+    def _json_safe(self, value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._json_safe(item) for item in value]
+        return value

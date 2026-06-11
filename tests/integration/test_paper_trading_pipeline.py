@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import func, select
 
 from mmbot.core.config import Settings, default_runtime_config
+from mmbot.db import models
 from mmbot.db.models import Base
 from mmbot.db.session import Database
 from mmbot.engines.market_data.engine import MarketDataEngine
@@ -116,6 +118,12 @@ async def test_market_data_flow_normalizes_analyzes_publishes_and_persists():
         assert analytics is not None
         assert json.loads(latest)["symbol"] == "BTC/USDT"
         assert runtime.health()["last_message_timestamp"]
+        assert runtime.health()["market_data_rows_written"] == 1
+        assert runtime.health()["liquidity_rows_written"] == 1
+        market_data_count = await session.scalar(select(func.count()).select_from(models.MarketData))
+        liquidity_count = await session.scalar(select(func.count()).select_from(models.LiquidityMetric))
+        assert market_data_count == 1
+        assert liquidity_count == 1
         await session.close()
     finally:
         await redis.close()

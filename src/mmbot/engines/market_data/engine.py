@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import math
+import logging
 import statistics
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
 
 from mmbot.core.config import LiquiditySettings
 from mmbot.db import models
 from mmbot.db.repositories import MarketDataRepository
 from mmbot.exchanges.types import Kline, OrderBookSnapshot, Ticker, TradeTick
 from mmbot.redis.manager import EngineCommunicationLayer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -79,11 +85,18 @@ class MarketDataEngine:
         return MarketStatistics(prices[-1] if prices else (kline_prices[-1] if kline_prices else None), len(trades), volume, vol, max(all_prices) if all_prices else None, min(all_prices) if all_prices else None)
 
     async def persist_ticker(self, repository: MarketDataRepository, trading_pair_id: uuid.UUID, ticker: Ticker) -> models.MarketData:
-        row = models.MarketData(exchange_name=ticker.exchange, trading_pair_id=trading_pair_id, data_type="ticker", bid_price=ticker.bid_price, bid_size=ticker.bid_size, ask_price=ticker.ask_price, ask_size=ticker.ask_size, last_price=ticker.last_price, volume_24h=ticker.volume_24h, source_timestamp=ticker.source_timestamp, payload=asdict(ticker))
-        saved = await repository.add(row)
-        if self.bus:
-            await self.bus.publish_event("market-data", "ticker", asdict(ticker))
-        return saved
+        logger.info("market_data_insert_attempt", extra={"table": "market_data", "exchange": ticker.exchange, "symbol": ticker.symbol, "data_type": "ticker"})
+        try:
+            payload = self._json_safe(asdict(ticker))
+            row = models.MarketData(exchange_name=ticker.exchange, trading_pair_id=trading_pair_id, data_type="ticker", bid_price=ticker.bid_price, bid_size=ticker.bid_size, ask_price=ticker.ask_price, ask_size=ticker.ask_size, last_price=ticker.last_price, volume_24h=ticker.volume_24h, source_timestamp=ticker.source_timestamp, payload=payload)
+            saved = await repository.add(row)
+            logger.info("market_data_insert_success", extra={"table": "market_data", "exchange": ticker.exchange, "symbol": ticker.symbol, "data_type": "ticker"})
+            if self.bus:
+                await self.bus.publish_event("market-data", "ticker", payload)
+            return saved
+        except Exception as exc:
+            logger.exception("market_data_insert_failed", extra={"table": "market_data", "exchange": ticker.exchange, "symbol": ticker.symbol, "data_type": "ticker", "error": str(exc)})
+            raise
 
     async def distribute_orderbook(self, orderbook: OrderBookSnapshot) -> None:
         if self.bus:
@@ -95,3 +108,16 @@ class MarketDataEngine:
         bid_depth = sum(level.size for level in orderbook.bids if level.price >= min_bid)
         ask_depth = sum(level.size for level in orderbook.asks if level.price <= max_ask)
         return bid_depth + ask_depth
+
+    def _json_safe(self, value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._json_safe(item) for item in value]
+        return value
