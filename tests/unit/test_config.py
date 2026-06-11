@@ -40,3 +40,43 @@ def test_database_url_preserves_explicit_asyncpg():
 def test_database_url_rejects_sync_postgresql_drivers():
     with pytest.raises(ValidationError):
         _settings("postgresql+psycopg2://user:password@postgres:5432/mmbot")
+
+
+def test_market_data_exchange_json_array_env_is_decoded(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("JWT_SECRET", secrets.token_urlsafe(48))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setenv("EXCHANGE_API_KEYS", '{"binance":"key"}')
+    monkeypatch.setenv("EXCHANGE_API_SECRETS", '{"binance":"secret"}')
+    monkeypatch.setenv("MARKET_DATA_EXCHANGES", '["binance"]')
+    monkeypatch.setenv("MARKET_DATA_SYMBOLS", '["BTC/USDT"]')
+    monkeypatch.setenv("MARKET_DATA_STREAMS", '["orderbook","ticker"]')
+
+    settings = Settings()
+
+    assert settings.MARKET_DATA_EXCHANGES == ["binance"]
+    assert settings.MARKET_DATA_SYMBOLS == ["BTC/USDT"]
+    assert settings.MARKET_DATA_STREAMS == ["orderbook", "ticker"]
+
+
+def test_market_data_exchange_quoted_json_array_env_is_decoded(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("JWT_SECRET", secrets.token_urlsafe(48))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setenv("EXCHANGE_API_KEYS", '{"binance":"key"}')
+    monkeypatch.setenv("EXCHANGE_API_SECRETS", '{"binance":"secret"}')
+    monkeypatch.setenv("MARKET_DATA_EXCHANGES", '\'["binance"]\'')
+    monkeypatch.setenv("MARKET_DATA_SYMBOLS", '"[\\"BTC/USDT\\"]"')
+    monkeypatch.setenv("MARKET_DATA_STREAMS", "orderbook,ticker")
+
+    settings = Settings()
+
+    assert settings.MARKET_DATA_EXCHANGES == ["binance"]
+    assert settings.MARKET_DATA_SYMBOLS == ["BTC/USDT"]
+    assert settings.MARKET_DATA_STREAMS == ["orderbook", "ticker"]

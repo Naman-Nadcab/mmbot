@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from functools import lru_cache
-from typing import Any, Dict, Literal
+from typing import Annotated, Any, Dict, Literal
 
 from pydantic import BaseModel, Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 AppEnv = Literal["development", "staging", "production", "test"]
 TradingMode = Literal["shadow", "paper", "canary", "live"]
@@ -36,9 +38,9 @@ class Settings(BaseSettings):
     EXCHANGE_RECONNECT_MAX_DELAY_SECONDS: float = 30.0
     JWT_ALGORITHM: str = "HS256"
     TRADING_MODE: TradingMode = "paper"
-    MARKET_DATA_EXCHANGES: list[str] = Field(default_factory=lambda: ["binance", "coinstore", "mexc", "gate", "bitmart", "kucoin"])
-    MARKET_DATA_SYMBOLS: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
-    MARKET_DATA_STREAMS: list[str] = Field(default_factory=lambda: ["orderbook", "trades", "ticker", "kline"])
+    MARKET_DATA_EXCHANGES: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["binance", "coinstore", "mexc", "gate", "bitmart", "kucoin"])
+    MARKET_DATA_SYMBOLS: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["BTC/USDT"])
+    MARKET_DATA_STREAMS: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["orderbook", "trades", "ticker", "kline"])
     MARKET_DATA_CONNECT_ON_START: bool = True
     MARKET_DATA_PERSIST_EVERY_N_MESSAGES: int = 25
     MARKET_MAKER_REFRESH_SECONDS: float = 5.0
@@ -75,6 +77,16 @@ class Settings(BaseSettings):
             return [str(item).strip() for item in value if str(item).strip()]
         if isinstance(value, str):
             stripped = value.strip()
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+                if isinstance(parsed, str):
+                    return cls.parse_string_lists(parsed)
+            except json.JSONDecodeError:
+                pass
+            if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+                stripped = stripped[1:-1].strip()
             if stripped.startswith("["):
                 parsed = json.loads(stripped)
                 if not isinstance(parsed, list):
@@ -181,4 +193,30 @@ def default_runtime_config() -> RuntimeConfig:
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    _emit_market_data_settings_diagnostics()
+    settings = Settings()
+    _emit_market_data_settings_diagnostics(settings)
+    return settings
+
+
+def _emit_market_data_settings_diagnostics(settings: Settings | None = None) -> None:
+    fields = ("MARKET_DATA_EXCHANGES", "MARKET_DATA_SYMBOLS", "MARKET_DATA_STREAMS")
+    for field in fields:
+        raw = os.environ.get(field)
+        decoded = getattr(settings, field, None) if settings is not None else None
+        provider = "EnvSettingsSource(os.environ)" if raw is not None else "DefaultSettingsSource"
+        print(
+            json.dumps(
+                {
+                    "event": "settings_startup_diagnostics",
+                    "field": field,
+                    "source_provider": provider,
+                    "raw_env_value": raw,
+                    "decoded_value": decoded,
+                    "phase": "after" if settings is not None else "before",
+                },
+                default=str,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
