@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from mmbot.exchanges.adapters import supported_exchanges
 from mmbot.redis.manager import RedisManager
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -223,6 +225,7 @@ async def operations_canary_limits(_: Annotated[dict, Depends(require_operations
 async def operations_stream(websocket: WebSocket) -> None:
     token = websocket.query_params.get("token")
     if not token:
+        logger.warning("websocket_auth_failed", extra={"path": websocket.url.path, "reason": "missing_token"})
         await websocket.close(code=1008)
         return
     try:
@@ -230,9 +233,12 @@ async def operations_stream(websocket: WebSocket) -> None:
         roles = set(actor.get("roles", []))
         permissions = set(actor.get("permissions", []))
         if not roles.intersection({"platform_admin", "risk_manager", "incident_responder", "read_only_analyst"}) and not permissions.intersection({"operations:read", "config:read", "risk:read"}):
+            logger.warning("websocket_auth_failed", extra={"path": websocket.url.path, "reason": "insufficient_permissions", "token_length": len(token), "token_prefix": token[:12], "token_suffix": token[-12:], "token_segments": len(token.split("."))})
             await websocket.close(code=1008)
             return
+        logger.info("websocket_auth_success", extra={"path": websocket.url.path, "token_length": len(token), "token_prefix": token[:12], "token_suffix": token[-12:], "token_segments": len(token.split(".")), "roles": list(roles), "permissions": list(permissions)})
     except HTTPException:
+        logger.warning("websocket_auth_failed", extra={"path": websocket.url.path, "reason": "decode_failed", "token_length": len(token), "token_prefix": token[:12], "token_suffix": token[-12:], "token_segments": len(token.split("."))})
         await websocket.close(code=1008)
         return
     await websocket.accept()
