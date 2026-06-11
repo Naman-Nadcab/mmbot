@@ -168,25 +168,7 @@ async function refreshRest() {
 
   if (state.token) {
     try {
-      const config = await request('/admin/config');
-      state.data.mode = config?.exchange ? 'paper/canary/live configured' : state.data.mode;
-      renderMode(config);
-    } catch (error) {
-      logEvent('admin_config_unavailable', { error: error.message });
-    }
-
-    try {
-      const exchanges = await request('/admin/exchanges/capabilities');
-      for (const [name, details] of Object.entries(exchanges)) {
-        state.data.exchanges[name] = { status: 'configured', detail: details.websocket_url || details.rest_base_url || 'configured' };
-      }
-      renderExchanges();
-    } catch (error) {
-      logEvent('exchange_capabilities_unavailable', { error: error.message });
-    }
-
-    try {
-      renderKillSwitch(await request('/admin/kill-switch/status'));
+      renderKillSwitch(await request('/operations/kill-switch'));
     } catch (error) {
       logEvent('kill_switch_status_unavailable', { error: error.message });
     }

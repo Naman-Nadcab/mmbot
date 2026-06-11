@@ -190,6 +190,12 @@ async def operations_reconciliation(redis: Annotated[RedisManager, Depends(get_r
     return {"status": status_value, "runs": runs, "mismatch_count": mismatches, "alert_count": alerts, "mismatches": []}
 
 
+@router.get("/operations/kill-switch")
+async def operations_kill_switch_status(redis: Annotated[RedisManager, Depends(get_redis)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
+    state = _loads_json(await redis.client.get("risk:kill_switch")) or {"active": False}
+    return state
+
+
 @router.get("/admin/kill-switch/status")
 async def admin_kill_switch_status(redis: Annotated[RedisManager, Depends(get_redis)], _: Annotated[dict, Depends(require_admin)]) -> dict:
     state = _loads_json(await redis.client.get("risk:kill_switch")) or {"active": False}
