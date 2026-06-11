@@ -3,6 +3,8 @@ const state = {
   token: localStorage.getItem('ops.token') || '',
   wsUrl: localStorage.getItem('ops.wsUrl') || defaultWsUrl(),
   socket: null,
+  wsReconnectTimer: null,
+  manualDisconnect: false,
   lastEvents: [],
   history: { pnl: [], inventory: [], marketMessages: [] },
   pagination: { orders: { page: 0, size: 50 }, trades: { page: 0, size: 50 } },
@@ -135,6 +137,7 @@ async function refreshOperations() {
 
 function connectWebSocket() {
   disconnectWebSocket();
+  state.manualDisconnect = false;
   state.wsUrl = $('ws-url').value.trim();
   localStorage.setItem('ops.wsUrl', state.wsUrl);
   if (!state.wsUrl) return;
@@ -143,7 +146,11 @@ function connectWebSocket() {
     state.socket = socket;
     setPill('ws-status', 'WebSocket connecting', 'warn');
     socket.onopen = () => { setPill('ws-status', 'WebSocket connected', 'ok'); logEvent('websocket_connected', { url: state.wsUrl }); };
-    socket.onclose = () => { setPill('ws-status', 'WebSocket disconnected', 'warn'); logEvent('websocket_disconnected'); };
+    socket.onclose = () => {
+      setPill('ws-status', 'WebSocket disconnected', 'warn');
+      logEvent('websocket_disconnected');
+      if (!state.manualDisconnect) scheduleWebSocketReconnect();
+    };
     socket.onerror = () => { setPill('ws-status', 'WebSocket error', 'bad'); logEvent('websocket_error'); };
     socket.onmessage = (event) => handleStreamMessage(event.data);
   } catch (error) {
@@ -153,8 +160,19 @@ function connectWebSocket() {
 }
 
 function disconnectWebSocket() {
+  state.manualDisconnect = true;
+  if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
+  state.wsReconnectTimer = null;
   if (state.socket) state.socket.close();
   state.socket = null;
+}
+
+function scheduleWebSocketReconnect() {
+  if (state.wsReconnectTimer) return;
+  state.wsReconnectTimer = setTimeout(() => {
+    state.wsReconnectTimer = null;
+    connectWebSocket();
+  }, 3000);
 }
 
 function handleStreamMessage(raw) {
@@ -258,6 +276,7 @@ function changePage(kind, direction) { const page = state.pagination[kind]; page
 function stackItem(name, status) { const cls = String(status).includes('healthy') || String(status).includes('ok') || String(status).includes('configured') ? 'ok' : String(status).includes('unhealthy') || String(status).includes('failed') ? 'bad' : 'neutral'; return `<div class="stack-item"><b>${esc(name)}</b><span class="pill ${cls}">${esc(status)}</span></div>`; }
 function formatMoney(value) { if (value === undefined || value === null || value === '') return '$0.00'; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : esc(value); }
 function formatNumber(value) { if (value === undefined || value === null || value === '') return ''; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : esc(value); }
+function formatDuration(seconds) { const total = Math.max(0, Math.floor(Number(seconds) || 0)); const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); const secs = total % 60; return hours ? `${hours}h ${minutes}m` : minutes ? `${minutes}m ${secs}s` : `${secs}s`; }
 function esc(value) { return String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function sampleHistory() {
   if (state.data.pnl) pushSample(state.history.pnl, Number(state.data.pnl.total || 0));
@@ -288,6 +307,8 @@ function renderLatencyAndThroughput() {
   const series = state.history.marketMessages;
   const throughput = series.length > 1 ? Math.max(0, series[series.length - 1] - series[series.length - 2]) / 10 : 0;
   $('message-throughput').textContent = `${formatNumber(throughput)}/s`;
+  const uptimes = Object.values(engines).map((engine) => Number(engine?.uptime_seconds || 0)).filter(Number.isFinite);
+  $('engine-uptime').textContent = formatDuration(Math.max(0, ...uptimes));
 }
 
 function init() {
