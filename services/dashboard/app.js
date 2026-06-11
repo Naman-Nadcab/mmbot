@@ -14,6 +14,9 @@ const state = {
   }
 };
 
+window.__dashboardRequestEvidence = window.__dashboardRequestEvidence || [];
+window.__dashboardFirst401 = window.__dashboardFirst401 || null;
+
 const $ = (id) => document.getElementById(id);
 const emptyRow = (cols) => `<tr><td colspan="${cols}" class="empty">No records returned by backend</td></tr>`;
 
@@ -83,11 +86,51 @@ function logEvent(message, payload) {
   $('event-log').textContent = state.lastEvents.join('\n');
 }
 
+function recordRequestEvidence(entry) {
+  const evidence = {
+    timestamp: new Date().toISOString(),
+    ...entry
+  };
+  window.__dashboardRequestEvidence.push(evidence);
+  if (evidence.status === 401 && !window.__dashboardFirst401) {
+    window.__dashboardFirst401 = evidence;
+  }
+  console.info('dashboard_request_evidence', evidence);
+}
+
 async function request(path) {
   syncStoredAuthState();
-  const response = await fetch(`${state.apiBase}${path}`, { headers: headers() });
-  if (!response.ok) throw new Error(`${path} ${response.status}`);
-  return response.json();
+  const url = `${state.apiBase}${path}`;
+  const requestHeaders = headers();
+  const authAttached = Boolean(requestHeaders.Authorization);
+  try {
+    const response = await fetch(url, { headers: requestHeaders });
+    recordRequestEvidence({
+      url,
+      status: response.status,
+      authAttached,
+      usedRequest: true,
+      bypassedRequest: false,
+      functionName: 'request',
+      sourceLine: 'services/dashboard/app.js:request'
+    });
+    if (!response.ok) throw new Error(`${path} ${response.status}`);
+    return response.json();
+  } catch (error) {
+    if (!window.__dashboardRequestEvidence.some((item) => item.url === url && item.status !== undefined)) {
+      recordRequestEvidence({
+        url,
+        status: null,
+        authAttached,
+        usedRequest: true,
+        bypassedRequest: false,
+        functionName: 'request',
+        sourceLine: 'services/dashboard/app.js:request',
+        error: error.message
+      });
+    }
+    throw error;
+  }
 }
 
 async function refreshRest() {
@@ -216,6 +259,15 @@ function connectWebSocket() {
       console.info('jwt_auth_diagnostics', tokenDiagnostics('websocket_query_token', state.token));
       url.searchParams.set('token', state.token);
     }
+    recordRequestEvidence({
+      url: url.toString(),
+      status: 'websocket_opening',
+      authAttached: Boolean(state.token),
+      usedRequest: false,
+      bypassedRequest: true,
+      functionName: 'connectWebSocket',
+      sourceLine: 'services/dashboard/app.js:connectWebSocket'
+    });
     const socket = new WebSocket(url.toString());
     state.socket = socket;
     setPill('ws-status', 'WebSocket connecting', 'warn');
