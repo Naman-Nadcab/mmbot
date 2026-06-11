@@ -1,5 +1,5 @@
 const state = {
-  apiBase: localStorage.getItem('ops.apiBase') || '/api',
+  apiBase: normalizeApiBase(localStorage.getItem('ops.apiBase') || '/api'),
   token: normalizeToken(localStorage.getItem('ops.token') || ''),
   wsUrl: localStorage.getItem('ops.wsUrl') || defaultWsUrl(),
   socket: null,
@@ -22,7 +22,23 @@ function defaultWsUrl() {
   return `${protocol}//${window.location.host}/api/ws/operations`;
 }
 
+function normalizeApiBase(value) {
+  const base = String(value || '/api').trim() || '/api';
+  return base.length > 1 ? base.replace(/\/+$/g, '') : base;
+}
+
+function syncStoredAuthState() {
+  state.apiBase = normalizeApiBase(localStorage.getItem('ops.apiBase') || state.apiBase || '/api');
+  const storedToken = normalizeToken(localStorage.getItem('ops.token') || state.token || '');
+  if (storedToken !== state.token) {
+    state.token = storedToken;
+    const tokenInput = $('bearer-token');
+    if (tokenInput) tokenInput.value = storedToken;
+  }
+}
+
 function headers() {
+  syncStoredAuthState();
   const h = { 'Accept': 'application/json' };
   if (state.token) {
     console.info('jwt_auth_diagnostics', tokenDiagnostics('rest_authorization_header', state.token));
@@ -68,12 +84,14 @@ function logEvent(message, payload) {
 }
 
 async function request(path) {
+  syncStoredAuthState();
   const response = await fetch(`${state.apiBase}${path}`, { headers: headers() });
   if (!response.ok) throw new Error(`${path} ${response.status}`);
   return response.json();
 }
 
 async function refreshRest() {
+  syncStoredAuthState();
   try {
     const health = await request('/health');
     state.data.infrastructure.api = health.status;
@@ -133,6 +151,7 @@ async function refreshRest() {
 }
 
 async function refreshOperations() {
+  syncStoredAuthState();
   if (!state.token) {
     setPill('ws-status', 'Token required', 'warn');
     logEvent('operations_auth_required', { message: 'Enter and save a JWT bearer token to load protected operations data.' });
@@ -182,6 +201,7 @@ async function refreshOperations() {
 function connectWebSocket() {
   disconnectWebSocket();
   state.manualDisconnect = false;
+  syncStoredAuthState();
   if (!state.token) {
     setPill('ws-status', 'Token required', 'warn');
     logEvent('websocket_auth_required', { message: 'Enter and save a JWT bearer token before opening the operations stream.' });
@@ -391,6 +411,7 @@ function reconciliationRows(payload) {
 }
 
 function init() {
+  syncStoredAuthState();
   $('api-base').value = state.apiBase;
   $('ws-url').value = state.wsUrl;
   $('bearer-token').value = state.token;
