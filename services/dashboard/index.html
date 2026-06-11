@@ -3,12 +3,97 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Market Making Platform Bootstrap</title>
+    <title>Market Maker Operations Dashboard</title>
+    <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <main>
-      <h1>Institutional Market Making Platform</h1>
-      <p>Operational dashboard asset container. Dynamic administration is served by the backend API.</p>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Institutional Crypto Market Making</p>
+        <h1>Operations Dashboard</h1>
+      </div>
+      <div class="status-strip" aria-live="polite">
+        <span id="api-status" class="pill neutral">API checking</span>
+        <span id="ws-status" class="pill neutral">WebSocket idle</span>
+        <span id="mode-pill" class="pill neutral">Mode unknown</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card controls" aria-labelledby="connection-title">
+        <h2 id="connection-title">Connection</h2>
+        <div class="form-grid">
+          <label>
+            API Base
+            <input id="api-base" value="/api" autocomplete="off" />
+          </label>
+          <label>
+            WebSocket URL
+            <input id="ws-url" autocomplete="off" />
+          </label>
+          <label>
+            Admin Bearer Token
+            <input id="bearer-token" type="password" autocomplete="off" />
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="save-token" type="button">Save Token</button>
+          <button id="refresh-now" type="button">Refresh Now</button>
+          <button id="connect-ws" type="button">Connect WebSocket</button>
+          <button id="disconnect-ws" type="button" class="secondary">Disconnect</button>
+        </div>
+        <p class="hint">REST uses existing backend endpoints. WebSocket panels update when an operations stream is available.</p>
+      </section>
+
+      <section class="grid metrics" aria-label="Core metrics">
+        <article class="metric-card"><span>Live PnL</span><strong id="pnl-value">Awaiting stream</strong><small id="pnl-subtitle">realized / unrealized</small></article>
+        <article class="metric-card"><span>Inventory Exposure</span><strong id="inventory-exposure">Awaiting stream</strong><small id="inventory-subtitle">notional / ratio</small></article>
+        <article class="metric-card"><span>Open Orders</span><strong id="open-orders-count">Awaiting stream</strong><small>paper / canary / live</small></article>
+        <article class="metric-card"><span>Risk Events</span><strong id="risk-count">Awaiting stream</strong><small>critical / warning</small></article>
+      </section>
+
+      <section class="grid two-col">
+        <article class="card">
+          <div class="card-header"><h2>Engine Health</h2><span id="engine-updated" class="muted">No stream update</span></div>
+          <div id="engine-health" class="stack"></div>
+        </article>
+        <article class="card">
+          <div class="card-header"><h2>Infrastructure</h2><span id="infra-updated" class="muted">Polling REST</span></div>
+          <div id="infra-health" class="stack"></div>
+        </article>
+      </section>
+
+      <section class="grid two-col">
+        <article class="card">
+          <div class="card-header"><h2>Exchange Connectivity</h2><span class="muted">WebSocket driven</span></div>
+          <div id="exchange-connectivity" class="stack"></div>
+        </article>
+        <article class="card danger-zone">
+          <div class="card-header"><h2>Kill Switch</h2><span id="kill-status" class="pill neutral">State unknown</span></div>
+          <p class="hint">UI control is disabled unless a backend kill-switch endpoint is available and authorized.</p>
+          <button id="kill-switch" type="button" class="danger" disabled>Activate Kill Switch</button>
+          <pre id="kill-output" class="log"></pre>
+        </article>
+      </section>
+
+      <section class="grid three-col">
+        <article class="card table-card"><div class="card-header"><h2>Positions</h2></div><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Asset</th><th>Qty</th><th>Notional</th><th>PnL</th></tr></thead><tbody id="positions-body"></tbody></table></div></article>
+        <article class="card table-card"><div class="card-header"><h2>Orders Monitor</h2></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Status</th><th>Price</th><th>Qty</th></tr></thead><tbody id="orders-body"></tbody></table></div></article>
+        <article class="card table-card"><div class="card-header"><h2>Trades Monitor</h2></div><div class="table-wrap"><table><thead><tr><th>Trade</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Fee</th></tr></thead><tbody id="trades-body"></tbody></table></div></article>
+      </section>
+
+      <section class="grid two-col">
+        <article class="card table-card"><div class="card-header"><h2>Risk Events</h2></div><div class="table-wrap"><table><thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>Time</th></tr></thead><tbody id="risk-body"></tbody></table></div></article>
+        <article class="card table-card"><div class="card-header"><h2>Reconciliation</h2><span id="reconciliation-status" class="pill neutral">Awaiting stream</span></div><div class="table-wrap"><table><thead><tr><th>Category</th><th>Key</th><th>Severity</th><th>Message</th></tr></thead><tbody id="reconciliation-body"></tbody></table></div></article>
+      </section>
+
+      <section class="card">
+        <div class="card-header"><h2>Runtime Event Log</h2><button id="clear-log" type="button" class="secondary">Clear</button></div>
+        <pre id="event-log" class="log"></pre>
+      </section>
     </main>
+
+    <template id="empty-row-template"><tr><td colspan="8" class="empty">Awaiting live data</td></tr></template>
+    <script src="/app.js" defer></script>
   </body>
 </html>
