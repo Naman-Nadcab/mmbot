@@ -4,6 +4,8 @@ const state = {
   wsUrl: localStorage.getItem('ops.wsUrl') || defaultWsUrl(),
   socket: null,
   lastEvents: [],
+  history: { pnl: [], inventory: [], marketMessages: [] },
+  pagination: { orders: { page: 0, size: 50 }, trades: { page: 0, size: 50 } },
   data: {
     positions: [], orders: [], trades: [], riskEvents: [], reconciliation: [],
     engines: {}, exchanges: {}, infrastructure: {}, pnl: null, inventory: null, mode: null
@@ -99,8 +101,9 @@ async function refreshRest() {
 async function refreshOperations() {
   const calls = [
     ['engines', '/operations/engines'],
-    ['orders', '/operations/orders'],
-    ['trades', '/operations/trades'],
+    ['infrastructureDetails', '/operations/infrastructure'],
+    ['orders', '/operations/orders?limit=500'],
+    ['trades', '/operations/trades?limit=500'],
     ['positions', '/operations/positions'],
     ['inventory', '/operations/inventory'],
     ['pnl', '/operations/pnl'],
@@ -111,6 +114,7 @@ async function refreshOperations() {
     try {
       const payload = await request(path);
       if (key === 'engines') state.data.engines = payload.engines || {};
+      else if (key === 'infrastructureDetails') state.data.infrastructure = { ...state.data.infrastructure, ...payload };
       else if (key === 'orders') state.data.orders = payload.items || [];
       else if (key === 'trades') state.data.trades = payload.items || [];
       else if (key === 'positions') state.data.positions = payload.items || [];
@@ -125,6 +129,7 @@ async function refreshOperations() {
       logEvent('operations_endpoint_unavailable', { endpoint: path, error: error.message });
     }
   }
+  sampleHistory();
   renderAll();
 }
 
@@ -165,7 +170,7 @@ function handleStreamMessage(raw) {
     case 'orders': state.data.orders = payload.items || payload.orders || []; break;
     case 'trades': state.data.trades = payload.items || payload.trades || []; break;
     case 'risk_events': state.data.riskEvents = payload.items || payload.events || []; break;
-    case 'engine_health': state.data.engines = payload.engines || payload; break;
+    case 'engine_health': state.data.engines = payload.engines || payload; sampleThroughput(payload); break;
     case 'exchange_connectivity': state.data.exchanges = payload.exchanges || payload; break;
     case 'infrastructure': state.data.infrastructure = { ...state.data.infrastructure, ...payload }; break;
     case 'reconciliation': state.data.reconciliation = payload.mismatches || payload.items || []; state.data.reconciliationStatus = payload.status; break;
@@ -177,7 +182,7 @@ function handleStreamMessage(raw) {
 
 function renderAll() {
   renderPnl(); renderPositions(); renderOrders(); renderTrades(); renderRisk(); renderEngines();
-  renderExchanges(); renderInfrastructure(); renderReconciliation(); renderMode(); renderInventory();
+  renderExchanges(); renderInfrastructure(); renderReconciliation(); renderMode(); renderInventory(); renderCharts(); renderLatencyAndThroughput();
 }
 
 function renderPnl() {
@@ -227,10 +232,14 @@ function renderPositions() {
 }
 function renderOrders() {
   $('open-orders-count').textContent = Array.isArray(state.data.orders) ? String(state.data.orders.length) : '0';
-  $('orders-body').innerHTML = rows(state.data.orders, 6, (o) => `<tr><td>${esc(o.client_order_id || o.id)}</td><td>${esc(o.symbol)}</td><td>${esc(o.side)}</td><td>${esc(o.status)}</td><td>${formatNumber(o.price)}</td><td>${formatNumber(o.quantity)}</td></tr>`);
+  const pageItems = pageSlice(state.data.orders, state.pagination.orders);
+  $('orders-body').innerHTML = rows(pageItems, 6, (o) => `<tr><td>${esc(o.client_order_id || o.id)}</td><td>${esc(o.symbol)}</td><td>${esc(o.side)}</td><td>${esc(o.status)}</td><td>${formatNumber(o.price)}</td><td>${formatNumber(o.quantity)}</td></tr>`);
+  $('orders-page').textContent = `${state.pagination.orders.page + 1}/${pageCount(state.data.orders, state.pagination.orders)}`;
 }
 function renderTrades() {
-  $('trades-body').innerHTML = rows(state.data.trades, 6, (t) => `<tr><td>${esc(t.trade_id || t.id)}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${formatNumber(t.price)}</td><td>${formatNumber(t.quantity)}</td><td>${formatNumber(t.fee)}</td></tr>`);
+  const pageItems = pageSlice(state.data.trades, state.pagination.trades);
+  $('trades-body').innerHTML = rows(pageItems, 6, (t) => `<tr><td>${esc(t.trade_id || t.id)}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${formatNumber(t.price)}</td><td>${formatNumber(t.quantity)}</td><td>${formatNumber(t.fee)}</td></tr>`);
+  $('trades-page').textContent = `${state.pagination.trades.page + 1}/${pageCount(state.data.trades, state.pagination.trades)}`;
 }
 function renderRisk() {
   const risk = state.data.riskEvents || [];
@@ -243,10 +252,43 @@ function renderReconciliation() {
 }
 
 function rows(items, cols, renderer) { return Array.isArray(items) && items.length ? items.map(renderer).join('') : emptyRow(cols); }
+function pageSlice(items, page) { const list = Array.isArray(items) ? items : []; const start = page.page * page.size; return list.slice(start, start + page.size); }
+function pageCount(items, page) { return Math.max(1, Math.ceil((Array.isArray(items) ? items.length : 0) / page.size)); }
+function changePage(kind, direction) { const page = state.pagination[kind]; page.page = Math.max(0, Math.min(page.page + direction, pageCount(state.data[kind], page) - 1)); renderAll(); }
 function stackItem(name, status) { const cls = String(status).includes('healthy') || String(status).includes('ok') || String(status).includes('configured') ? 'ok' : String(status).includes('unhealthy') || String(status).includes('failed') ? 'bad' : 'neutral'; return `<div class="stack-item"><b>${esc(name)}</b><span class="pill ${cls}">${esc(status)}</span></div>`; }
 function formatMoney(value) { if (value === undefined || value === null || value === '') return '$0.00'; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : esc(value); }
 function formatNumber(value) { if (value === undefined || value === null || value === '') return ''; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : esc(value); }
 function esc(value) { return String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function sampleHistory() {
+  if (state.data.pnl) pushSample(state.history.pnl, Number(state.data.pnl.total || 0));
+  if (state.data.inventory) pushSample(state.history.inventory, Number(state.data.inventory.exposure_notional || state.data.inventory.total_notional || 0));
+}
+function sampleThroughput(payload) {
+  const engines = payload.engines || payload;
+  const dataEngine = engines['market-data-engine'] || {};
+  const counters = dataEngine.runtime?.metrics?.counters || {};
+  pushSample(state.history.marketMessages, Number(counters['market_data.messages'] || 0));
+}
+function pushSample(series, value) { if (Number.isFinite(value)) { series.push(value); while (series.length > 40) series.shift(); } }
+function renderCharts() { renderBarChart('pnl-chart', state.history.pnl, ''); renderBarChart('inventory-chart', state.history.inventory, 'inventory'); }
+function renderBarChart(id, values, cls) {
+  const el = $(id);
+  const max = Math.max(...values.map((v) => Math.abs(v)), 1);
+  el.innerHTML = values.length ? values.map((v) => `<div class="bar ${cls}" title="${formatNumber(v)}" style="height:${Math.max(4, Math.abs(v) / max * 100)}%"></div>`).join('') : '<div class="empty">No chart samples yet</div>';
+}
+function renderLatencyAndThroughput() {
+  $('redis-latency').textContent = `${formatNumber(state.data.infrastructure.redis_latency_ms || 0)} ms`;
+  $('db-latency').textContent = `${formatNumber(state.data.infrastructure.database_latency_ms || 0)} ms`;
+  const engines = state.data.engines || {};
+  const dataEngine = engines['market-data-engine'] || {};
+  const runtime = dataEngine.runtime || {};
+  const lastTimes = Object.values(runtime.last_message_timestamp || {});
+  const latest = lastTimes.length ? Math.max(...lastTimes.map((value) => Date.parse(value)).filter(Number.isFinite)) : 0;
+  $('market-latency').textContent = latest ? `${formatNumber(Date.now() - latest)} ms` : '0 ms';
+  const series = state.history.marketMessages;
+  const throughput = series.length > 1 ? Math.max(0, series[series.length - 1] - series[series.length - 2]) / 10 : 0;
+  $('message-throughput').textContent = `${formatNumber(throughput)}/s`;
+}
 
 function init() {
   $('api-base').value = state.apiBase;
@@ -256,9 +298,13 @@ function init() {
   $('refresh-now').addEventListener('click', refreshRest);
   $('connect-ws').addEventListener('click', connectWebSocket);
   $('disconnect-ws').addEventListener('click', disconnectWebSocket);
+  $('orders-prev').addEventListener('click', () => changePage('orders', -1));
+  $('orders-next').addEventListener('click', () => changePage('orders', 1));
+  $('trades-prev').addEventListener('click', () => changePage('trades', -1));
+  $('trades-next').addEventListener('click', () => changePage('trades', 1));
   $('clear-log').addEventListener('click', () => { state.lastEvents = []; $('event-log').textContent = ''; });
   $('kill-switch').addEventListener('click', () => { $('kill-output').textContent = 'Kill switch endpoint is not available from existing backend APIs.'; });
-  renderAll(); refreshRest(); setInterval(refreshRest, 10000);
+  renderAll(); refreshRest(); connectWebSocket(); setInterval(refreshRest, 10000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

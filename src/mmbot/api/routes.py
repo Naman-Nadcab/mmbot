@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import time
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,6 +97,22 @@ async def operations_engines(redis: Annotated[RedisManager, Depends(get_redis)])
     return {"engines": {name: _loads_json(value) for name, value in engines.items()}}
 
 
+@router.get("/operations/infrastructure")
+async def operations_infrastructure(database: Annotated[Database, Depends(get_database)], redis: Annotated[RedisManager, Depends(get_redis)]) -> dict:
+    db_started = time.perf_counter()
+    database_ok = await database.health_check()
+    db_latency_ms = (time.perf_counter() - db_started) * 1000
+    redis_started = time.perf_counter()
+    redis_ok = await redis.health_check()
+    redis_latency_ms = (time.perf_counter() - redis_started) * 1000
+    return {
+        "database": "healthy" if database_ok else "unhealthy",
+        "redis": "healthy" if redis_ok else "unhealthy",
+        "database_latency_ms": round(db_latency_ms, 3),
+        "redis_latency_ms": round(redis_latency_ms, 3),
+    }
+
+
 @router.get("/operations/orders")
 async def operations_orders(session: Annotated[AsyncSession, Depends(get_session)], limit: int = 100) -> dict:
     pairs = await _pair_map(session)
@@ -147,6 +166,88 @@ async def operations_reconciliation(redis: Annotated[RedisManager, Depends(get_r
     runs = int(counters.get("reconciliation.runs", 0) or 0)
     status_value = "ok" if runs > 0 and mismatches == 0 else "warning" if runs > 0 else "not_running"
     return {"status": status_value, "runs": runs, "mismatch_count": mismatches, "alert_count": alerts, "mismatches": []}
+
+
+@router.websocket("/ws/operations")
+async def operations_stream(websocket: WebSocket) -> None:
+    await websocket.accept()
+    database: Database = websocket.app.state.database
+    redis: RedisManager = websocket.app.state.redis
+    last_seen: dict[str, object] = {"orders": set(), "trades": set(), "risk_events": set(), "risk_approvals": 0, "risk_rejections": 0, "reconciliation_runs": 0, "reconnect_count": 0}
+    try:
+        while True:
+            async with database.session(actor_service="operations-ws") as session:
+                await _send_operation_events(websocket, session, redis, last_seen)
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        return
+
+
+async def _send_operation_events(websocket: WebSocket, session: AsyncSession, redis: RedisManager, last_seen: dict[str, object]) -> None:
+    pairs = await _pair_map(session)
+    engine_payload = (await operations_engines(redis))["engines"]
+    await websocket.send_text(json.dumps({"type": "engine_health", "payload": {"engines": engine_payload}}, default=str))
+
+    maker_health = _loads_json(await redis.client.get("engine:health:market-maker-engine")) or {}
+    data_health = _loads_json(await redis.client.get("engine:health:market-data-engine")) or {}
+    counters = (((maker_health.get("runtime") or {}).get("metrics") or {}).get("counters") or {})
+    data_counters = (((data_health.get("runtime") or {}).get("metrics") or {}).get("counters") or {})
+
+    risk_approvals = _int_counter(counters.get("risk.approvals"))
+    if risk_approvals > int(last_seen["risk_approvals"]):
+        await websocket.send_text(json.dumps({"type": "risk_approved", "payload": {"count": risk_approvals}}, default=str))
+        last_seen["risk_approvals"] = risk_approvals
+
+    risk_rejections = _int_counter(counters.get("risk.rejections"))
+    if risk_rejections > int(last_seen["risk_rejections"]):
+        await websocket.send_text(json.dumps({"type": "risk_rejected", "payload": {"count": risk_rejections}}, default=str))
+        last_seen["risk_rejections"] = risk_rejections
+
+    reconciliation_runs = _int_counter(counters.get("reconciliation.runs"))
+    if reconciliation_runs > int(last_seen["reconciliation_runs"]):
+        await websocket.send_text(json.dumps({"type": "reconciliation_completed", "payload": await operations_reconciliation(redis)}, default=str))
+        last_seen["reconciliation_runs"] = reconciliation_runs
+
+    reconnect_count = _int_counter(data_counters.get("market_data.reconnect_count"))
+    if reconnect_count > int(last_seen["reconnect_count"]):
+        await websocket.send_text(json.dumps({"type": "websocket_reconnected", "payload": {"count": reconnect_count}}, default=str))
+        last_seen["reconnect_count"] = reconnect_count
+
+    order_result = await session.execute(select(models.Order).order_by(desc(models.Order.created_at)).limit(50))
+    orders = [_order_payload(row, pairs) for row in order_result.scalars().all()]
+    known_orders: set[str] = last_seen["orders"]  # type: ignore[assignment]
+    new_orders = [order for order in orders if order["id"] not in known_orders]
+    if new_orders:
+        for order in new_orders:
+            await websocket.send_text(json.dumps({"type": "order_created", "payload": order}, default=str))
+            known_orders.add(order["id"])
+        await websocket.send_text(json.dumps({"type": "orders", "payload": {"items": orders}}, default=str))
+
+    trade_result = await session.execute(select(models.Trade).order_by(desc(models.Trade.traded_at)).limit(50))
+    trades = [_trade_payload(row, pairs) for row in trade_result.scalars().all()]
+    known_trades: set[str] = last_seen["trades"]  # type: ignore[assignment]
+    new_trades = [trade for trade in trades if trade["id"] not in known_trades]
+    if new_trades:
+        for trade in new_trades:
+            await websocket.send_text(json.dumps({"type": "order_filled", "payload": trade}, default=str))
+            known_trades.add(trade["id"])
+        await websocket.send_text(json.dumps({"type": "trades", "payload": {"items": trades}}, default=str))
+
+    risk_result = await session.execute(select(models.RiskEvent).order_by(desc(models.RiskEvent.occurred_at)).limit(50))
+    risk_events = [_risk_payload(row) for row in risk_result.scalars().all()]
+    known_risks: set[str] = last_seen["risk_events"]  # type: ignore[assignment]
+    for event in risk_events:
+        if event["id"] not in known_risks:
+            await websocket.send_text(json.dumps({"type": "risk_events", "payload": {"items": risk_events}}, default=str))
+            known_risks.add(event["id"])
+            break
+
+    positions = (await operations_positions(session))["items"]
+    inventory = await operations_inventory(session)
+    pnl = await operations_pnl(session)
+    await websocket.send_text(json.dumps({"type": "positions", "payload": {"items": positions}}, default=str))
+    await websocket.send_text(json.dumps({"type": "inventory", "payload": inventory}, default=str))
+    await websocket.send_text(json.dumps({"type": "pnl", "payload": pnl}, default=str))
 
 
 async def _pair_map(session: AsyncSession) -> dict[uuid.UUID, str]:
@@ -243,3 +344,10 @@ def _loads_json(value: object) -> object:
     import json
 
     return json.loads(value if isinstance(value, str) else value.decode())
+
+
+def _int_counter(value: object) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0

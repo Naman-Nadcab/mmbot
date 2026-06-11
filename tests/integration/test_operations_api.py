@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 
 from mmbot.api.dependencies import get_database, get_redis, get_session
 from mmbot.api.main import create_app
+from mmbot.api.routes import _send_operation_events
 from mmbot.core.config import Settings
 from mmbot.db import models
 from mmbot.db.models import Base
@@ -103,4 +104,42 @@ async def test_operations_endpoints_return_real_state():
         assert (await client.get("/operations/pnl")).json()["total"] == 5.0
         assert len((await client.get("/operations/risk-events")).json()["items"]) == 1
         assert (await client.get("/operations/reconciliation")).json()["status"] == "ok"
+
+        infrastructure = (await client.get("/operations/infrastructure")).json()
+        assert infrastructure["database"] == "healthy"
+        assert infrastructure["redis"] == "healthy"
+        assert infrastructure["database_latency_ms"] >= 0
+        assert infrastructure["redis_latency_ms"] >= 0
     await database.close()
+
+
+class MemoryWebSocket:
+    def __init__(self):
+        self.messages = []
+
+    async def send_text(self, value):
+        self.messages.append(json.loads(value))
+
+
+@pytest.mark.asyncio
+async def test_operations_websocket_event_producer_streams_existing_state():
+    database = Database(_settings())
+    redis = MemoryRedisManager()
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with database.session() as session:
+            account = models.ExchangeAccount(exchange_name="paper", account_alias="paper", environment="sandbox", api_key_ciphertext=b"k", api_secret_ciphertext=b"s", encryption_key_id="test", permissions=[], is_enabled=True)
+            pair = models.TradingPair(exchange_name="paper", base_asset="BTC", quote_asset="USDT", normalized_symbol="BTC/USDT", venue_symbol="BTCUSDT", price_precision=8, quantity_precision=8)
+            session.add_all([account, pair])
+            await session.flush()
+            session.add(models.Position(exchange_account_id=account.id, trading_pair_id=pair.id, asset="BTC", side=models.PositionSide.long, quantity=Decimal("1"), realized_pnl=Decimal("2"), unrealized_pnl=Decimal("3"), mark_price=Decimal("100")))
+        await redis.client.set("engine:health:market-maker-engine", json.dumps({"status": "healthy", "runtime": {"metrics": {"counters": {"reconciliation.runs": 1, "reconciliation.mismatches": 0, "risk.approvals": 1}}}}))
+        websocket = MemoryWebSocket()
+        async with database.session() as session:
+            await _send_operation_events(websocket, session, redis, {"orders": set(), "trades": set(), "risk_events": set(), "risk_approvals": 0, "risk_rejections": 0, "reconciliation_runs": 0, "reconnect_count": 0})
+        assert any(message["type"] == "engine_health" for message in websocket.messages)
+        assert any(message["type"] == "risk_approved" for message in websocket.messages)
+        assert any(message["type"] == "positions" for message in websocket.messages)
+    finally:
+        await database.close()

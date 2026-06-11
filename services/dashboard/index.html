@@ -53,6 +53,18 @@
       </section>
 
       <section class="grid two-col">
+        <article class="card"><div class="card-header"><h2>PnL Chart</h2><span class="muted">backend samples</span></div><div id="pnl-chart" class="chart"></div></article>
+        <article class="card"><div class="card-header"><h2>Inventory Chart</h2><span class="muted">exposure samples</span></div><div id="inventory-chart" class="chart"></div></article>
+      </section>
+
+      <section class="grid metrics" aria-label="Latency and throughput">
+        <article class="metric-card"><span>Market Data Latency</span><strong id="market-latency">0 ms</strong><small>last message age</small></article>
+        <article class="metric-card"><span>Redis Latency</span><strong id="redis-latency">0 ms</strong><small>health poll</small></article>
+        <article class="metric-card"><span>DB Latency</span><strong id="db-latency">0 ms</strong><small>health poll</small></article>
+        <article class="metric-card"><span>Message Throughput</span><strong id="message-throughput">0/s</strong><small>market data messages</small></article>
+      </section>
+
+      <section class="grid two-col">
         <article class="card">
           <div class="card-header"><h2>Engine Health</h2><span id="engine-updated" class="muted">No stream update</span></div>
           <div id="engine-health" class="stack"></div>
@@ -78,8 +90,8 @@
 
       <section class="grid three-col">
         <article class="card table-card"><div class="card-header"><h2>Positions</h2></div><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Asset</th><th>Qty</th><th>Notional</th><th>PnL</th></tr></thead><tbody id="positions-body"></tbody></table></div></article>
-        <article class="card table-card"><div class="card-header"><h2>Orders Monitor</h2></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Status</th><th>Price</th><th>Qty</th></tr></thead><tbody id="orders-body"></tbody></table></div></article>
-        <article class="card table-card"><div class="card-header"><h2>Trades Monitor</h2></div><div class="table-wrap"><table><thead><tr><th>Trade</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Fee</th></tr></thead><tbody id="trades-body"></tbody></table></div></article>
+        <article class="card table-card"><div class="card-header"><h2>Orders Monitor</h2><div class="pager"><button id="orders-prev" class="secondary" type="button">Prev</button><span id="orders-page">1</span><button id="orders-next" class="secondary" type="button">Next</button></div></div><div class="table-wrap virtualized"><table><thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Status</th><th>Price</th><th>Qty</th></tr></thead><tbody id="orders-body"></tbody></table></div></article>
+        <article class="card table-card"><div class="card-header"><h2>Trades Monitor</h2><div class="pager"><button id="trades-prev" class="secondary" type="button">Prev</button><span id="trades-page">1</span><button id="trades-next" class="secondary" type="button">Next</button></div></div><div class="table-wrap virtualized"><table><thead><tr><th>Trade</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Fee</th></tr></thead><tbody id="trades-body"></tbody></table></div></article>
       </section>
 
       <section class="grid two-col">
