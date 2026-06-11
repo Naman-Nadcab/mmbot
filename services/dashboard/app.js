@@ -104,6 +104,7 @@ async function refreshOperations() {
   const calls = [
     ['engines', '/operations/engines'],
     ['infrastructureDetails', '/operations/infrastructure'],
+    ['exchanges', '/operations/exchanges'],
     ['orders', '/operations/orders?limit=500'],
     ['trades', '/operations/trades?limit=500'],
     ['positions', '/operations/positions'],
@@ -115,8 +116,12 @@ async function refreshOperations() {
   for (const [key, path] of calls) {
     try {
       const payload = await request(path);
-      if (key === 'engines') state.data.engines = payload.engines || {};
+      if (key === 'engines') {
+        state.data.engines = payload.engines || {};
+        sampleThroughput(payload);
+      }
       else if (key === 'infrastructureDetails') state.data.infrastructure = { ...state.data.infrastructure, ...payload };
+      else if (key === 'exchanges') state.data.exchanges = payload.exchanges || {};
       else if (key === 'orders') state.data.orders = payload.items || [];
       else if (key === 'trades') state.data.trades = payload.items || [];
       else if (key === 'positions') state.data.positions = payload.items || [];
@@ -124,7 +129,7 @@ async function refreshOperations() {
       else if (key === 'pnl') state.data.pnl = payload;
       else if (key === 'riskEvents') state.data.riskEvents = payload.items || [];
       else if (key === 'reconciliationPayload') {
-        state.data.reconciliation = payload.mismatches || [];
+        state.data.reconciliation = reconciliationRows(payload);
         state.data.reconciliationStatus = `${payload.status} (${payload.runs} runs)`;
       }
     } catch (error) {
@@ -191,7 +196,7 @@ function handleStreamMessage(raw) {
     case 'engine_health': state.data.engines = payload.engines || payload; sampleThroughput(payload); break;
     case 'exchange_connectivity': state.data.exchanges = payload.exchanges || payload; break;
     case 'infrastructure': state.data.infrastructure = { ...state.data.infrastructure, ...payload }; break;
-    case 'reconciliation': state.data.reconciliation = payload.mismatches || payload.items || []; state.data.reconciliationStatus = payload.status; break;
+    case 'reconciliation': state.data.reconciliation = reconciliationRows(payload); state.data.reconciliationStatus = `${payload.status} (${payload.runs ?? 0} runs)`; break;
     case 'mode': state.data.mode = payload.mode || payload; break;
     default: break;
   }
@@ -286,9 +291,9 @@ function sampleThroughput(payload) {
   const engines = payload.engines || payload;
   const dataEngine = engines['market-data-engine'] || {};
   const counters = dataEngine.runtime?.metrics?.counters || {};
-  pushSample(state.history.marketMessages, Number(counters['market_data.messages'] || 0));
+  pushSample(state.history.marketMessages, { value: Number(counters['market_data.messages'] || 0), time: Date.now() });
 }
-function pushSample(series, value) { if (Number.isFinite(value)) { series.push(value); while (series.length > 40) series.shift(); } }
+function pushSample(series, value) { if (typeof value === 'object' || Number.isFinite(value)) { series.push(value); while (series.length > 40) series.shift(); } }
 function renderCharts() { renderBarChart('pnl-chart', state.history.pnl, ''); renderBarChart('inventory-chart', state.history.inventory, 'inventory'); }
 function renderBarChart(id, values, cls) {
   const el = $(id);
@@ -305,10 +310,23 @@ function renderLatencyAndThroughput() {
   const latest = lastTimes.length ? Math.max(...lastTimes.map((value) => Date.parse(value)).filter(Number.isFinite)) : 0;
   $('market-latency').textContent = latest ? `${formatNumber(Date.now() - latest)} ms` : '0 ms';
   const series = state.history.marketMessages;
-  const throughput = series.length > 1 ? Math.max(0, series[series.length - 1] - series[series.length - 2]) / 10 : 0;
+  const previous = series[series.length - 2];
+  const current = series[series.length - 1];
+  const throughput = previous && current ? Math.max(0, current.value - previous.value) / Math.max(1, (current.time - previous.time) / 1000) : 0;
   $('message-throughput').textContent = `${formatNumber(throughput)}/s`;
   const uptimes = Object.values(engines).map((engine) => Number(engine?.uptime_seconds || 0)).filter(Number.isFinite);
   $('engine-uptime').textContent = formatDuration(Math.max(0, ...uptimes));
+}
+
+function reconciliationRows(payload) {
+  const mismatches = payload.mismatches || payload.items || [];
+  if (mismatches.length) return mismatches;
+  return [{
+    category: 'summary',
+    key: `runs=${payload.runs ?? 0}`,
+    severity: payload.status || 'unknown',
+    message: `mismatches=${payload.mismatch_count ?? 0}, alerts=${payload.alert_count ?? 0}`
+  }];
 }
 
 function init() {

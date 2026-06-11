@@ -113,6 +113,25 @@ async def operations_infrastructure(database: Annotated[Database, Depends(get_da
     }
 
 
+@router.get("/operations/exchanges")
+async def operations_exchanges(redis: Annotated[RedisManager, Depends(get_redis)]) -> dict:
+    data_health = _loads_json(await redis.client.get("engine:health:market-data-engine")) or {}
+    runtime = data_health.get("runtime") or {}
+    last_messages = runtime.get("last_message_timestamp") or {}
+    active_subscriptions = int(runtime.get("active_subscriptions") or 0)
+    websocket_state = runtime.get("websocket_state") or "unknown"
+    exchanges: dict[str, dict[str, object]] = {}
+    for key, timestamp in last_messages.items():
+        exchange = str(key).split(":", 1)[0]
+        exchanges.setdefault(exchange, {"exchange": exchange, "status": "connected", "symbols": [], "last_message_timestamp": timestamp, "websocket_state": websocket_state, "active_subscriptions": active_subscriptions})
+        if ":" in str(key):
+            exchanges[exchange]["symbols"].append(str(key).split(":", 1)[1])
+        exchanges[exchange]["last_message_timestamp"] = timestamp
+    for name in supported_exchanges():
+        exchanges.setdefault(name, {"exchange": name, "status": "configured_no_messages", "symbols": [], "last_message_timestamp": None, "websocket_state": websocket_state, "active_subscriptions": active_subscriptions})
+    return {"exchanges": exchanges}
+
+
 @router.get("/operations/orders")
 async def operations_orders(session: Annotated[AsyncSession, Depends(get_session)], limit: int = 100) -> dict:
     pairs = await _pair_map(session)
@@ -187,6 +206,7 @@ async def _send_operation_events(websocket: WebSocket, session: AsyncSession, re
     pairs = await _pair_map(session)
     engine_payload = (await operations_engines(redis))["engines"]
     await websocket.send_text(json.dumps({"type": "engine_health", "payload": {"engines": engine_payload}}, default=str))
+    await websocket.send_text(json.dumps({"type": "exchange_connectivity", "payload": await operations_exchanges(redis)}, default=str))
 
     maker_health = _loads_json(await redis.client.get("engine:health:market-maker-engine")) or {}
     data_health = _loads_json(await redis.client.get("engine:health:market-data-engine")) or {}

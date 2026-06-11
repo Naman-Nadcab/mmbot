@@ -84,6 +84,7 @@ async def test_operations_endpoints_return_real_state():
         session.add(models.RiskEvent(severity=models.RiskSeverity.low, event_type="TEST", source_component="test", message="risk", metadata_json={}))
         await session.commit()
     await redis.client.set("engine:health:market-maker-engine", json.dumps({"status": "healthy", "runtime": {"metrics": {"counters": {"reconciliation.runs": 1, "reconciliation.mismatches": 0}}}}))
+    await redis.client.set("engine:health:market-data-engine", json.dumps({"status": "healthy", "runtime": {"last_message_timestamp": {"binance:BTC/USDT": "2026-06-11T09:00:00+00:00"}, "active_subscriptions": 4, "websocket_state": "active"}}))
 
     app = create_app()
     app.dependency_overrides[get_database] = lambda: database
@@ -104,6 +105,7 @@ async def test_operations_endpoints_return_real_state():
         assert (await client.get("/operations/pnl")).json()["total"] == 5.0
         assert len((await client.get("/operations/risk-events")).json()["items"]) == 1
         assert (await client.get("/operations/reconciliation")).json()["status"] == "ok"
+        assert (await client.get("/operations/exchanges")).json()["exchanges"]["binance"]["status"] == "connected"
 
         infrastructure = (await client.get("/operations/infrastructure")).json()
         assert infrastructure["database"] == "healthy"
@@ -135,10 +137,12 @@ async def test_operations_websocket_event_producer_streams_existing_state():
             await session.flush()
             session.add(models.Position(exchange_account_id=account.id, trading_pair_id=pair.id, asset="BTC", side=models.PositionSide.long, quantity=Decimal("1"), realized_pnl=Decimal("2"), unrealized_pnl=Decimal("3"), mark_price=Decimal("100")))
         await redis.client.set("engine:health:market-maker-engine", json.dumps({"status": "healthy", "runtime": {"metrics": {"counters": {"reconciliation.runs": 1, "reconciliation.mismatches": 0, "risk.approvals": 1}}}}))
+        await redis.client.set("engine:health:market-data-engine", json.dumps({"status": "healthy", "runtime": {"last_message_timestamp": {"binance:BTC/USDT": "2026-06-11T09:00:00+00:00"}, "active_subscriptions": 4, "websocket_state": "active", "metrics": {"counters": {"market_data.reconnect_count": 1}}}}))
         websocket = MemoryWebSocket()
         async with database.session() as session:
             await _send_operation_events(websocket, session, redis, {"orders": set(), "trades": set(), "risk_events": set(), "risk_approvals": 0, "risk_rejections": 0, "reconciliation_runs": 0, "reconnect_count": 0})
         assert any(message["type"] == "engine_health" for message in websocket.messages)
+        assert any(message["type"] == "exchange_connectivity" for message in websocket.messages)
         assert any(message["type"] == "risk_approved" for message in websocket.messages)
         assert any(message["type"] == "positions" for message in websocket.messages)
     finally:
