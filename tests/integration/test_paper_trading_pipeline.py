@@ -133,6 +133,48 @@ async def test_market_data_flow_normalizes_analyzes_publishes_and_persists():
 
 
 @pytest.mark.asyncio
+async def test_market_data_payload_datetime_is_serialized_before_json_bind():
+    settings = _settings("redis://localhost:6379/0")
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with database.session(actor_service="test") as session:
+            pair = models.TradingPair(
+                exchange_name="binance",
+                base_asset="BTC",
+                quote_asset="USDT",
+                normalized_symbol="BTC/USDT",
+                venue_symbol="BTCUSDT",
+                price_precision=8,
+                quantity_precision=8,
+                is_enabled=True,
+            )
+            session.add(pair)
+            await session.flush()
+            source_timestamp = datetime.now(timezone.utc)
+            session.add(
+                models.MarketData(
+                    exchange_name="binance",
+                    trading_pair_id=pair.id,
+                    data_type="order_book",
+                    bid_price=99999.0,
+                    bid_size=1.0,
+                    ask_price=100001.0,
+                    ask_size=1.0,
+                    last_price=100000.0,
+                    source_timestamp=source_timestamp,
+                    payload={"source_timestamp": source_timestamp, "nested": {"seen_at": source_timestamp}},
+                )
+            )
+        async with database.session() as session:
+            market_data_count = await session.scalar(select(func.count()).select_from(models.MarketData))
+            assert market_data_count == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_market_maker_flow_generates_risk_checks_paper_fills_and_reconciles():
     _redis_server.store = {}
     server = await asyncio.start_server(_redis_server, "127.0.0.1", 0)

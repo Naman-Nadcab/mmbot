@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, LargeBinary, Numeric, String, Text, UniqueConstraint, func
@@ -17,6 +19,29 @@ class PortableJSON(TypeDecorator):
 
     def load_dialect_impl(self, dialect):
         return dialect.type_descriptor(JSONB() if dialect.name == "postgresql" else JSON())
+
+    def process_bind_param(self, value, dialect):
+        return _json_safe(value)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 class PortableUUID(TypeDecorator):
