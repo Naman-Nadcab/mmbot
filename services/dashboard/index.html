@@ -46,10 +46,10 @@
       </section>
 
       <section class="grid metrics" aria-label="Core metrics">
-        <article class="metric-card"><span>Live PnL</span><strong id="pnl-value">Awaiting stream</strong><small id="pnl-subtitle">realized / unrealized</small></article>
-        <article class="metric-card"><span>Inventory Exposure</span><strong id="inventory-exposure">Awaiting stream</strong><small id="inventory-subtitle">notional / ratio</small></article>
-        <article class="metric-card"><span>Open Orders</span><strong id="open-orders-count">Awaiting stream</strong><small>paper / canary / live</small></article>
-        <article class="metric-card"><span>Risk Events</span><strong id="risk-count">Awaiting stream</strong><small>critical / warning</small></article>
+        <article class="metric-card"><span>Live PnL</span><strong id="pnl-value">$0.00</strong><small id="pnl-subtitle">realized / unrealized</small></article>
+        <article class="metric-card"><span>Inventory Exposure</span><strong id="inventory-exposure">$0.00</strong><small id="inventory-subtitle">notional / ratio</small></article>
+        <article class="metric-card"><span>Open Orders</span><strong id="open-orders-count">0</strong><small>paper / canary / live</small></article>
+        <article class="metric-card"><span>Risk Events</span><strong id="risk-count">0</strong><small>critical / warning</small></article>
       </section>
 
       <section class="grid two-col">
@@ -84,7 +84,7 @@
 
       <section class="grid two-col">
         <article class="card table-card"><div class="card-header"><h2>Risk Events</h2></div><div class="table-wrap"><table><thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>Time</th></tr></thead><tbody id="risk-body"></tbody></table></div></article>
-        <article class="card table-card"><div class="card-header"><h2>Reconciliation</h2><span id="reconciliation-status" class="pill neutral">Awaiting stream</span></div><div class="table-wrap"><table><thead><tr><th>Category</th><th>Key</th><th>Severity</th><th>Message</th></tr></thead><tbody id="reconciliation-body"></tbody></table></div></article>
+        <article class="card table-card"><div class="card-header"><h2>Reconciliation</h2><span id="reconciliation-status" class="pill neutral">No reconciliation state</span></div><div class="table-wrap"><table><thead><tr><th>Category</th><th>Key</th><th>Severity</th><th>Message</th></tr></thead><tbody id="reconciliation-body"></tbody></table></div></article>
       </section>
 
       <section class="card">
@@ -93,7 +93,7 @@
       </section>
     </main>
 
-    <template id="empty-row-template"><tr><td colspan="8" class="empty">Awaiting live data</td></tr></template>
+    <template id="empty-row-template"><tr><td colspan="8" class="empty">No records returned by backend</td></tr></template>
     <script src="/app.js" defer></script>
   </body>
 </html>

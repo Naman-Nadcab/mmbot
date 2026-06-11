@@ -11,7 +11,7 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
-const emptyRow = (cols) => `<tr><td colspan="${cols}" class="empty">Awaiting live data</td></tr>`;
+const emptyRow = (cols) => `<tr><td colspan="${cols}" class="empty">No records returned by backend</td></tr>`;
 
 function defaultWsUrl() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -65,6 +65,16 @@ async function refreshRest() {
     state.data.infrastructure.version = 'unavailable';
   }
 
+  try {
+    const ready = await request('/ready');
+    state.data.infrastructure.ready = ready.status;
+    renderInfrastructure();
+  } catch (error) {
+    state.data.infrastructure.ready = error.message;
+  }
+
+  await refreshOperations();
+
   if (state.token) {
     try {
       const config = await request('/admin/config');
@@ -84,6 +94,38 @@ async function refreshRest() {
       logEvent('exchange_capabilities_unavailable', { error: error.message });
     }
   }
+}
+
+async function refreshOperations() {
+  const calls = [
+    ['engines', '/operations/engines'],
+    ['orders', '/operations/orders'],
+    ['trades', '/operations/trades'],
+    ['positions', '/operations/positions'],
+    ['inventory', '/operations/inventory'],
+    ['pnl', '/operations/pnl'],
+    ['riskEvents', '/operations/risk-events'],
+    ['reconciliationPayload', '/operations/reconciliation']
+  ];
+  for (const [key, path] of calls) {
+    try {
+      const payload = await request(path);
+      if (key === 'engines') state.data.engines = payload.engines || {};
+      else if (key === 'orders') state.data.orders = payload.items || [];
+      else if (key === 'trades') state.data.trades = payload.items || [];
+      else if (key === 'positions') state.data.positions = payload.items || [];
+      else if (key === 'inventory') state.data.inventory = payload;
+      else if (key === 'pnl') state.data.pnl = payload;
+      else if (key === 'riskEvents') state.data.riskEvents = payload.items || [];
+      else if (key === 'reconciliationPayload') {
+        state.data.reconciliation = payload.mismatches || [];
+        state.data.reconciliationStatus = `${payload.status} (${payload.runs} runs)`;
+      }
+    } catch (error) {
+      logEvent('operations_endpoint_unavailable', { endpoint: path, error: error.message });
+    }
+  }
+  renderAll();
 }
 
 function connectWebSocket() {
@@ -140,14 +182,14 @@ function renderAll() {
 
 function renderPnl() {
   const pnl = state.data.pnl;
-  $('pnl-value').textContent = pnl ? formatMoney(pnl.total ?? pnl.unrealized ?? pnl.realized) : 'Awaiting stream';
+  $('pnl-value').textContent = pnl ? formatMoney(pnl.total ?? pnl.unrealized ?? pnl.realized) : formatMoney(0);
   $('pnl-subtitle').textContent = pnl ? `realized ${formatMoney(pnl.realized)} / unrealized ${formatMoney(pnl.unrealized)}` : 'realized / unrealized';
 }
 
 function renderInventory() {
   const inv = state.data.inventory;
-  $('inventory-exposure').textContent = inv ? formatMoney(inv.exposure_notional ?? inv.total_notional) : 'Awaiting stream';
-  $('inventory-subtitle').textContent = inv ? `skew ${formatNumber(inv.skew_bps)} bps` : 'notional / ratio';
+  $('inventory-exposure').textContent = inv ? formatMoney(inv.exposure_notional ?? inv.total_notional) : formatMoney(0);
+  $('inventory-subtitle').textContent = inv ? `${(inv.items || []).length} inventory snapshots` : '0 inventory snapshots';
 }
 
 function renderMode(config) {
@@ -163,6 +205,7 @@ function renderInfrastructure() {
     stackItem('Database', infra.database || 'checking'),
     stackItem('Redis', infra.redis || 'checking'),
     stackItem('PostgreSQL', infra.postgres || infra.database || 'checking'),
+    stackItem('Readiness', infra.ready || 'checking'),
     stackItem('Version', infra.version || 'unknown')
   ].join('');
 }
@@ -170,20 +213,20 @@ function renderInfrastructure() {
 function renderEngines() {
   const engines = state.data.engines;
   const entries = Object.entries(engines || {});
-  $('engine-health').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value.status || value.health_status || JSON.stringify(value))).join('') : stackItem('Market Data Engine', 'Awaiting stream') + stackItem('Market Maker Engine', 'Awaiting stream') + stackItem('Risk Engine', 'Awaiting stream');
-  $('engine-updated').textContent = entries.length ? 'Live stream' : 'No stream update';
+  $('engine-health').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value?.status || value?.health_status || JSON.stringify(value))).join('') : stackItem('Engine Health', 'No engine health records returned');
+  $('engine-updated').textContent = entries.length ? 'Backend state' : 'No engine health records';
 }
 
 function renderExchanges() {
   const entries = Object.entries(state.data.exchanges || {});
-  $('exchange-connectivity').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value.status || value.detail || JSON.stringify(value))).join('') : stackItem('Exchanges', 'Awaiting stream or admin token');
+  $('exchange-connectivity').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value.status || value.detail || JSON.stringify(value))).join('') : stackItem('Exchanges', 'No exchange state returned');
 }
 
 function renderPositions() {
   $('positions-body').innerHTML = rows(state.data.positions, 5, (p) => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.asset)}</td><td>${formatNumber(p.quantity)}</td><td>${formatMoney(p.notional)}</td><td>${formatMoney(p.pnl ?? p.unrealized_pnl)}</td></tr>`);
 }
 function renderOrders() {
-  $('open-orders-count').textContent = Array.isArray(state.data.orders) ? String(state.data.orders.length) : 'Awaiting stream';
+  $('open-orders-count').textContent = Array.isArray(state.data.orders) ? String(state.data.orders.length) : '0';
   $('orders-body').innerHTML = rows(state.data.orders, 6, (o) => `<tr><td>${esc(o.client_order_id || o.id)}</td><td>${esc(o.symbol)}</td><td>${esc(o.side)}</td><td>${esc(o.status)}</td><td>${formatNumber(o.price)}</td><td>${formatNumber(o.quantity)}</td></tr>`);
 }
 function renderTrades() {
@@ -191,17 +234,17 @@ function renderTrades() {
 }
 function renderRisk() {
   const risk = state.data.riskEvents || [];
-  $('risk-count').textContent = risk.length ? String(risk.length) : 'Awaiting stream';
+  $('risk-count').textContent = String(risk.length);
   $('risk-body').innerHTML = rows(risk, 4, (r) => `<tr><td>${esc(r.severity)}</td><td>${esc(r.event_type || r.type)}</td><td>${esc(r.message)}</td><td>${esc(r.occurred_at || r.time)}</td></tr>`);
 }
 function renderReconciliation() {
-  setPill('reconciliation-status', state.data.reconciliationStatus || 'Awaiting stream', state.data.reconciliationStatus === 'ok' ? 'ok' : 'neutral');
+  setPill('reconciliation-status', state.data.reconciliationStatus || 'No reconciliation state', String(state.data.reconciliationStatus || '').includes('ok') ? 'ok' : 'neutral');
   $('reconciliation-body').innerHTML = rows(state.data.reconciliation, 4, (r) => `<tr><td>${esc(r.category)}</td><td>${esc(r.key)}</td><td>${esc(r.severity)}</td><td>${esc(r.message)}</td></tr>`);
 }
 
 function rows(items, cols, renderer) { return Array.isArray(items) && items.length ? items.map(renderer).join('') : emptyRow(cols); }
 function stackItem(name, status) { const cls = String(status).includes('healthy') || String(status).includes('ok') || String(status).includes('configured') ? 'ok' : String(status).includes('unhealthy') || String(status).includes('failed') ? 'bad' : 'neutral'; return `<div class="stack-item"><b>${esc(name)}</b><span class="pill ${cls}">${esc(status)}</span></div>`; }
-function formatMoney(value) { if (value === undefined || value === null || value === '') return 'Awaiting stream'; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : esc(value); }
+function formatMoney(value) { if (value === undefined || value === null || value === '') return '$0.00'; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : esc(value); }
 function formatNumber(value) { if (value === undefined || value === null || value === '') return ''; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : esc(value); }
 function esc(value) { return String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
