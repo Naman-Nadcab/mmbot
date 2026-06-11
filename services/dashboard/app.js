@@ -28,6 +28,10 @@ function headers() {
   return h;
 }
 
+function normalizeToken(value) {
+  return String(value || '').trim().replace(/^Bearer\s+/i, '').trim();
+}
+
 function setPill(id, text, status = 'neutral') {
   const el = $(id);
   el.textContent = text;
@@ -107,6 +111,11 @@ async function refreshRest() {
 }
 
 async function refreshOperations() {
+  if (!state.token) {
+    setPill('ws-status', 'Token required', 'warn');
+    logEvent('operations_auth_required', { message: 'Enter and save a JWT bearer token to load protected operations data.' });
+    return;
+  }
   const calls = [
     ['engines', '/operations/engines'],
     ['infrastructureDetails', '/operations/infrastructure'],
@@ -151,6 +160,11 @@ async function refreshOperations() {
 function connectWebSocket() {
   disconnectWebSocket();
   state.manualDisconnect = false;
+  if (!state.token) {
+    setPill('ws-status', 'Token required', 'warn');
+    logEvent('websocket_auth_required', { message: 'Enter and save a JWT bearer token before opening the operations stream.' });
+    return;
+  }
   state.wsUrl = $('ws-url').value.trim();
   localStorage.setItem('ops.wsUrl', state.wsUrl);
   if (!state.wsUrl) return;
@@ -355,7 +369,15 @@ function init() {
   $('api-base').value = state.apiBase;
   $('ws-url').value = state.wsUrl;
   $('bearer-token').value = state.token;
-  $('save-token').addEventListener('click', () => { state.apiBase = $('api-base').value.trim() || '/api'; state.token = $('bearer-token').value.trim(); localStorage.setItem('ops.apiBase', state.apiBase); localStorage.setItem('ops.token', state.token); refreshRest(); });
+  $('save-token').addEventListener('click', () => {
+    state.apiBase = $('api-base').value.trim() || '/api';
+    state.token = normalizeToken($('bearer-token').value);
+    $('bearer-token').value = state.token;
+    localStorage.setItem('ops.apiBase', state.apiBase);
+    localStorage.setItem('ops.token', state.token);
+    refreshRest();
+    connectWebSocket();
+  });
   $('refresh-now').addEventListener('click', refreshRest);
   $('connect-ws').addEventListener('click', connectWebSocket);
   $('disconnect-ws').addEventListener('click', disconnectWebSocket);
