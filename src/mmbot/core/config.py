@@ -140,6 +140,7 @@ class StrategySettings(BaseModel):
     cancel_replace_enabled: bool = True
     quote_refresh_seconds: float = Field(gt=0)
     stale_market_data_seconds: float = Field(gt=0)
+    max_order_age_seconds: float = Field(gt=0)
 
 
 class OrderSizeSettings(BaseModel):
@@ -249,7 +250,7 @@ class RuntimeConfig(BaseModel):
 
 def default_runtime_config() -> RuntimeConfig:
     return RuntimeConfig(
-        strategy=StrategySettings(trading_enabled=True, quoting_enabled=True, passive_only=True, cancel_replace_enabled=True, quote_refresh_seconds=5.0, stale_market_data_seconds=30.0),
+        strategy=StrategySettings(trading_enabled=True, quoting_enabled=True, passive_only=True, cancel_replace_enabled=True, quote_refresh_seconds=5.0, stale_market_data_seconds=30.0, max_order_age_seconds=60.0),
         spread=SpreadSettings(base_spread_bps=20, min_spread_bps=5, max_spread_bps=200, volatility_multiplier=1.5),
         order_layers=OrderLayerSettings(enabled_levels=3, spacing_bps=20, outer_level_multiplier=1.25, refresh_threshold_bps=5, max_active_orders_per_side=3),
         order_size=OrderSizeSettings(base_order_size=0.01, min_order_size=0.001, max_order_size=1.0, ladder_levels=3, ladder_size_multiplier=1.25),

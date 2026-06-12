@@ -514,7 +514,11 @@ function renderInventory() {
 }
 
 function renderOrders() {
-  $('open-orders-count').textContent = String(state.data.orders.length || 0);
+  const lifecycle = orderLifecycle();
+  $('open-orders-count').textContent = String(lifecycle.open_orders_count ?? state.data.orders.length ?? 0);
+  $('stale-orders-count').textContent = String(lifecycle.stale_orders_count ?? 0);
+  $('cancelled-orders-count').textContent = String(lifecycle.cancelled_orders_count ?? 0);
+  $('reconciliation-actions-count').textContent = String(lifecycle.reconciliation_actions ?? 0);
   const items = pageSlice(state.data.orders, state.pagination.orders);
   $('orders-body').innerHTML = rows(items, 6, (o) => `<tr><td>${esc(o.client_order_id || o.id)}</td><td>${esc(o.symbol)}</td><td>${esc(o.side)}</td><td>${esc(o.status)}</td><td>${num(o.price)}</td><td>${num(o.quantity)}</td></tr>`);
   $('orders-page').textContent = `${state.pagination.orders.page + 1}/${pageCount(state.data.orders, state.pagination.orders)}`;
@@ -539,10 +543,22 @@ function renderAudit() {
 
 function renderEngines() {
   const entries = Object.entries(state.data.engines || {});
-  $('engine-health').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value?.status || JSON.stringify(value))).join('') : stackItem('Engine Health', 'No engine health records returned');
+  const lifecycle = orderLifecycle();
+  const lifecycleItems = Object.keys(lifecycle).length ? [
+    stackItem('Active Buy Orders', lifecycle.active_buy_orders ?? 0),
+    stackItem('Active Sell Orders', lifecycle.active_sell_orders ?? 0),
+    stackItem('Average Order Age', `${num(lifecycle.average_order_age)}s`),
+    stackItem('Replacement Count', lifecycle.replacement_count ?? 0),
+    stackItem('Risk Rejections Last Hour', lifecycle.risk_rejections_last_hour ?? 0)
+  ].join('') : '';
+  $('engine-health').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value?.status || JSON.stringify(value))).join('') + lifecycleItems : stackItem('Engine Health', 'No engine health records returned');
   const maker = state.data.engines['market-maker-engine'];
   const runtime = maker?.runtime || {};
   setPill('mode-pill', `${runtime.mode || 'mode unknown'} ${runtime.trading_enabled === false ? 'disabled' : 'enabled'}`, runtime.trading_enabled === false ? 'bad' : 'ok');
+}
+
+function orderLifecycle() {
+  return state.data.engines?.['market-maker-engine']?.runtime?.order_lifecycle || {};
 }
 
 function renderInfrastructure() {

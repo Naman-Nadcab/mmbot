@@ -227,12 +227,15 @@ class PaperExecutionEngine:
             "REPLACED": models.OrderStatus.cancelled,
         }[order.status]
         if row is None:
-            row = models.Order(client_order_id=order.intent.client_order_id, exchange_order_id=order.exchange_order_id, exchange_account_id=account_id, trading_pair_id=pair_id, side=models.OrderSide(order.intent.side.value), order_type=models.OrderType.limit, status=status, price=order.intent.price, quantity=order.intent.quantity, filled_quantity=order.filled_quantity, average_fill_price=order.average_price, metadata_json={"mode": "paper"})
+            row = models.Order(client_order_id=order.intent.client_order_id, exchange_order_id=order.exchange_order_id, exchange_account_id=account_id, trading_pair_id=pair_id, side=models.OrderSide(order.intent.side.value), order_type=models.OrderType.limit, status=status, price=order.intent.price, quantity=order.intent.quantity, filled_quantity=order.filled_quantity, average_fill_price=order.average_price, metadata_json={"mode": "paper", **dict(order.intent.metadata)})
             self.session.add(row)
         else:
             row.status = status
+            row.price = order.intent.price
+            row.quantity = order.intent.quantity
             row.filled_quantity = order.filled_quantity
             row.average_fill_price = order.average_price
+            row.metadata_json = {**(row.metadata_json or {}), "mode": "paper", **dict(order.intent.metadata)}
         await self.session.flush()
         logger.info("db_insert_success", extra={"table": "orders", "client_order_id": order.intent.client_order_id, "status": order.status})
 

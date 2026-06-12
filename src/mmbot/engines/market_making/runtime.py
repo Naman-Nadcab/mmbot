@@ -66,6 +66,11 @@ class MarketMakerRuntime:
         self.latest_analytics: dict[str, dict[str, Any]] = {}
         self.latest_volume_progress: VolumeProgressReport | None = None
         self.last_reconciliation_at = datetime.now(timezone.utc)
+        self.lifecycle_cancelled_orders = 0
+        self.lifecycle_stale_orders = 0
+        self.lifecycle_replacements = 0
+        self.lifecycle_reconciliation_actions = 0
+        self.risk_rejection_timestamps: list[datetime] = []
         self.started = False
         self.pubsub: Any | None = None
         self.consumer_task: asyncio.Task[None] | None = None
@@ -139,6 +144,7 @@ class MarketMakerRuntime:
             "known_tickers": len(self.latest_ticker),
             "known_orderbooks": len(self.latest_orderbook),
             "open_paper_orders": len(self.paper.open_orders),
+            "order_lifecycle": self._order_lifecycle_metrics(),
             "paper_fills": len(self.paper.fills),
             "metrics": self.metrics.snapshot(),
         }
@@ -310,6 +316,8 @@ class MarketMakerRuntime:
         if not self.trading_enabled:
             self.metrics.increment("market_maker.trading_disabled_blocks")
             return
+        if self.mode is LaunchMode.paper:
+            quotes = await self._sync_paper_ladder(symbol, quotes)
         for quote in quotes:
             side = ExecutionSide.buy if quote.side == "buy" else ExecutionSide.sell
             venue = ExecutionVenue.coinstore if self.mode in {LaunchMode.canary, LaunchMode.live} else ExecutionVenue.binance
@@ -322,6 +330,7 @@ class MarketMakerRuntime:
                 price=Decimal(str(quote.price)),
                 client_order_id=quote.client_order_id,
                 time_in_force=TimeInForce.gtc,
+                metadata={"symbol": symbol, "side": quote.side, "level": quote.level, "ladder_key": self._ladder_key(symbol, quote.side, quote.level)},
             )
             risk_intent = RiskOrderIntent(symbol, quote.side, quote.price, quote.quantity)
             try:
@@ -348,11 +357,118 @@ class MarketMakerRuntime:
             except Exception as exc:
                 self.metrics.increment("risk.rejections")
                 self.metrics.increment("market_maker.quote_rejections")
+                self.risk_rejection_timestamps.append(datetime.now(timezone.utc))
                 await self._persist_risk_event(symbol, str(exc))
 
     async def _persist_risk_event(self, symbol: str, message: str) -> None:
         self.session.add(models.RiskEvent(severity=models.RiskSeverity.high, event_type="PAPER_ORDER_REJECTED", source_component="market-maker-engine", message=message, metadata_json={"symbol": symbol, "mode": self.mode.value}))
         await self.session.flush()
+
+    async def _sync_paper_ladder(self, symbol: str, desired: list[Quote]) -> list[Quote]:
+        now = datetime.now(timezone.utc)
+        max_age = float(self.runtime_config.strategy.max_order_age_seconds)
+        desired_by_key = {self._ladder_key(symbol, quote.side, quote.level): quote for quote in desired}
+        existing_by_key: dict[str, list[tuple[str, Any]]] = {}
+        for client_order_id, order in list(self.paper.open_orders.items()):
+            if order.intent.symbol != symbol:
+                continue
+            key = self._order_ladder_key(order)
+            if key is None:
+                await self._cancel_paper_lifecycle_order(client_order_id, "orphan_missing_ladder_key")
+                continue
+            existing_by_key.setdefault(key, []).append((client_order_id, order))
+
+        to_place: list[Quote] = []
+        for key, orders in list(existing_by_key.items()):
+            desired_quote = desired_by_key.get(key)
+            if desired_quote is None:
+                for client_order_id, _order in orders:
+                    await self._cancel_paper_lifecycle_order(client_order_id, "outside_desired_ladder")
+                continue
+            orders.sort(key=lambda item: item[1].created_at, reverse=True)
+            keep_client_id: str | None = None
+            for index, (client_order_id, order) in enumerate(orders):
+                age = (now - order.created_at).total_seconds()
+                if index > 0:
+                    await self._cancel_paper_lifecycle_order(client_order_id, "duplicate_ladder_order")
+                    continue
+                if age >= max_age:
+                    await self._cancel_paper_lifecycle_order(client_order_id, "stale_order")
+                    self.lifecycle_stale_orders += 1
+                    to_place.append(desired_quote)
+                    continue
+                if self._quote_drifted(order, desired_quote):
+                    await self._cancel_paper_lifecycle_order(client_order_id, "price_or_size_drift")
+                    self.lifecycle_replacements += 1
+                    to_place.append(desired_quote)
+                    continue
+                keep_client_id = client_order_id
+            if keep_client_id:
+                desired_by_key.pop(key, None)
+            elif key in desired_by_key and desired_quote not in to_place:
+                to_place.append(desired_quote)
+                desired_by_key.pop(key, None)
+
+        to_place.extend(desired_by_key.values())
+        self._update_lifecycle_gauges()
+        return to_place
+
+    async def _cancel_paper_lifecycle_order(self, client_order_id: str, reason: str) -> None:
+        cancelled = await self.paper.cancel_order(client_order_id)
+        if cancelled is not None:
+            self.lifecycle_cancelled_orders += 1
+            self.lifecycle_reconciliation_actions += 1
+            self.metrics.increment("order_lifecycle.cancelled_orders")
+            logger.info("paper_lifecycle_order_cancelled", extra={"client_order_id": client_order_id, "reason": reason})
+
+    def _quote_drifted(self, order: Any, desired: Quote) -> bool:
+        if order.intent.price is None:
+            return True
+        price = float(order.intent.price)
+        quantity = float(order.intent.quantity)
+        price_diff_bps = abs(desired.price - price) / max(abs(desired.price), 1e-12) * 10000
+        quantity_diff = abs(desired.quantity - quantity)
+        return price_diff_bps >= self.runtime_config.order_layers.refresh_threshold_bps or quantity_diff > 1e-12
+
+    def _order_ladder_key(self, order: Any) -> str | None:
+        metadata = getattr(order.intent, "metadata", {}) or {}
+        if metadata.get("ladder_key"):
+            return str(metadata["ladder_key"])
+        side = metadata.get("side") or getattr(order.intent.side, "value", None)
+        level = metadata.get("level")
+        symbol = metadata.get("symbol") or order.intent.symbol
+        if side is None or level is None or symbol is None:
+            return None
+        return self._ladder_key(str(symbol), str(side), int(level))
+
+    def _ladder_key(self, symbol: str, side: str, level: int) -> str:
+        return f"{symbol}:{side}:{level}"
+
+    def _order_lifecycle_metrics(self) -> dict[str, object]:
+        now = datetime.now(timezone.utc)
+        orders = list(self.paper.open_orders.values())
+        ages = [(now - order.created_at).total_seconds() for order in orders]
+        active_buy = sum(1 for order in orders if order.intent.side is ExecutionSide.buy)
+        active_sell = sum(1 for order in orders if order.intent.side is ExecutionSide.sell)
+        cutoff = now - timedelta(hours=1)
+        self.risk_rejection_timestamps = [item for item in self.risk_rejection_timestamps if item >= cutoff]
+        return {
+            "open_orders_count": len(orders),
+            "active_buy_orders": active_buy,
+            "active_sell_orders": active_sell,
+            "average_order_age": round(sum(ages) / len(ages), 3) if ages else 0.0,
+            "stale_orders_count": self.lifecycle_stale_orders,
+            "cancelled_orders_count": self.lifecycle_cancelled_orders,
+            "replacement_count": self.lifecycle_replacements,
+            "reconciliation_actions": self.lifecycle_reconciliation_actions,
+            "risk_rejections_last_hour": len(self.risk_rejection_timestamps),
+        }
+
+    def _update_lifecycle_gauges(self) -> None:
+        metrics = self._order_lifecycle_metrics()
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)):
+                self.metrics.set_gauge(f"order_lifecycle.{key}", float(value))
 
     async def _persist_inventory(self, symbol: str, mid: float, balances: list[AssetBalance]) -> None:
         account_id = await self.paper._ensure_exchange_account()
@@ -576,12 +692,44 @@ class MarketMakerRuntime:
                 self._handle_reconciliation_mismatches(len(report.mismatches))
             return
         snapshot = self.paper.reconciliation_snapshot()
-        mismatches = self.reconciliation_engine.reconcile(snapshot, snapshot)
+        actions = await self._reconcile_paper_order_state()
+        mismatches = []
         self.metrics.increment("reconciliation.runs")
         self.metrics.increment("reconciliation.mismatches", len(mismatches))
-        logger.info("reconciliation_completed", extra={"mismatch_count": len(mismatches), "mode": self.mode.value})
+        self.metrics.increment("order_lifecycle.reconciliation_actions", actions)
+        logger.info("reconciliation_completed", extra={"mismatch_count": len(mismatches), "mode": self.mode.value, "reconciliation_actions": actions, "open_order_count": len(snapshot.orders)})
         if mismatches:
             self._handle_reconciliation_mismatches(len(mismatches))
+
+    async def _reconcile_paper_order_state(self) -> int:
+        actions = 0
+        now = datetime.now(timezone.utc)
+        max_age = float(self.runtime_config.strategy.max_order_age_seconds)
+        for client_order_id, order in list(self.paper.open_orders.items()):
+            if (now - order.created_at).total_seconds() >= max_age:
+                await self._cancel_paper_lifecycle_order(client_order_id, "reconciliation_stale_order")
+                self.lifecycle_stale_orders += 1
+                actions += 1
+
+        account_id = await self.paper._ensure_exchange_account()
+        result = await self.session.execute(
+            select(models.Order).where(
+                models.Order.exchange_account_id == account_id,
+                models.Order.status.in_([models.OrderStatus.created, models.OrderStatus.submitted, models.OrderStatus.open, models.OrderStatus.partially_filled]),
+            )
+        )
+        active_ids = set(self.paper.open_orders)
+        for row in result.scalars().all():
+            if row.client_order_id not in active_ids:
+                row.status = models.OrderStatus.cancelled
+                row.metadata_json = {**(row.metadata_json or {}), "orphan_cleanup": True, "orphan_cleanup_at": now.isoformat()}
+                actions += 1
+                self.lifecycle_reconciliation_actions += 1
+                self.lifecycle_cancelled_orders += 1
+        if actions:
+            await self.session.flush()
+        self._update_lifecycle_gauges()
+        return actions
 
     def _handle_reconciliation_mismatches(self, mismatch_count: int) -> None:
         self.metrics.increment("reconciliation.alerts", mismatch_count)
