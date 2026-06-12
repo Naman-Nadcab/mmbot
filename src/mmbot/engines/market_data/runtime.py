@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import asdict
@@ -11,7 +12,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mmbot.core.config import Settings, default_runtime_config
+from mmbot.core.config import RuntimeConfig, Settings, default_runtime_config
 from mmbot.db import models
 from mmbot.engines.market_data.engine import MarketDataEngine
 from mmbot.execution.models import ExecutionVenue
@@ -125,6 +126,8 @@ class MarketDataRuntime:
         self.normalizer = MarketDataNormalizer()
         self.connectors: list[VenueWebSocketConnector] = []
         self.tasks: list[asyncio.Task[None]] = []
+        self.command_task: asyncio.Task[None] | None = None
+        self.pubsub: Any | None = None
         self.last_message_at: dict[str, datetime] = {}
         self.active_subscriptions = 0
         self.reconnect_count = 0
@@ -146,7 +149,9 @@ class MarketDataRuntime:
         self._started = True
         if not self.settings.MARKET_DATA_CONNECT_ON_START:
             logger.info("market_data_connections_disabled", extra={"component_name": "market-data-engine"})
+            await self._start_command_listener()
             return
+        await self._start_command_listener()
         for exchange in self.settings.MARKET_DATA_EXCHANGES:
             venue = ExecutionVenue(exchange.lower())
             connector = VenueWebSocketConnector(venue, self.settings.EXCHANGE_RECONNECT_MAX_DELAY_SECONDS, default_runtime_config().exchange.heartbeat_interval_seconds)
@@ -158,6 +163,11 @@ class MarketDataRuntime:
         self.metrics.set_gauge("market_data.active_subscriptions", float(self.active_subscriptions))
 
     async def stop(self) -> None:
+        if self.command_task is not None:
+            self.command_task.cancel()
+            await asyncio.gather(self.command_task, return_exceptions=True)
+        if self.pubsub is not None:
+            await self.pubsub.aclose()
         for connector in self.connectors:
             connector.stop()
         for task in self.tasks:
@@ -194,6 +204,44 @@ class MarketDataRuntime:
             "websocket_state": "active" if self.tasks and all(not task.done() for task in self.tasks) else "disabled",
             "metrics": self.metrics.snapshot(),
         }
+
+    async def _start_command_listener(self) -> None:
+        if self.command_task is not None:
+            return
+        self.pubsub = self.bus.pubsub.client.pubsub()
+        await self.pubsub.psubscribe("engine.commands.market-data-engine", "runtime.config.liquidity.updated", "runtime.config.exchange.updated")
+        self.command_task = asyncio.create_task(self._consume_runtime_commands(), name="market-data-runtime-command-consumer")
+
+    async def _consume_runtime_commands(self) -> None:
+        if self.pubsub is None:
+            return
+        while True:
+            try:
+                message = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if not message:
+                    await asyncio.sleep(0.1)
+                    continue
+                channel = message.get("channel")
+                data = message.get("data")
+                if isinstance(channel, bytes):
+                    channel = channel.decode()
+                if isinstance(data, bytes):
+                    data = data.decode()
+                if not isinstance(data, str):
+                    continue
+                payload = json.loads(data)
+                runtime_payload = payload.get("runtime_config") or payload.get("payload", {}).get("runtime_config")
+                if isinstance(runtime_payload, dict):
+                    config = RuntimeConfig.model_validate(runtime_payload)
+                    self.engine.liquidity_settings = config.liquidity
+                    self.metrics.increment("runtime.config_reloads")
+                    logger.info("market_data_runtime_config_reloaded", extra={"channel": channel})
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.metrics.increment("market_data.runtime_command_errors")
+                logger.warning("market_data_runtime_command_recovered", extra={"error": str(exc)})
+                await asyncio.sleep(1.0)
 
     def validate_health(self) -> None:
         if not self.settings.MARKET_DATA_CONNECT_ON_START:

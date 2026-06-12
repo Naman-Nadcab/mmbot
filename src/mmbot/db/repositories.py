@@ -77,5 +77,26 @@ class InventoryRepository(Repository[models.InventorySnapshot]):
 class AuditRepository(Repository[models.AuditLog]):
     model = models.AuditLog
 
-    async def record(self, actor_service: str, action: str, resource_type: str, resource_id: uuid.UUID | None, metadata: dict[str, Any]) -> models.AuditLog:
-        return await self.add(models.AuditLog(actor_service=actor_service, action=action, resource_type=resource_type, resource_id=resource_id, metadata_json=metadata))
+    async def record(
+        self,
+        actor_service: str,
+        action: str,
+        resource_type: str,
+        resource_id: uuid.UUID | None,
+        metadata: dict[str, Any],
+        actor_user_id: uuid.UUID | None = None,
+        before_state: dict[str, Any] | None = None,
+        after_state: dict[str, Any] | None = None,
+    ) -> models.AuditLog:
+        return await self.add(
+            models.AuditLog(
+                actor_user_id=actor_user_id,
+                actor_service=actor_service,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                before_state=before_state,
+                after_state=after_state,
+                metadata_json=metadata,
+            )
+        )

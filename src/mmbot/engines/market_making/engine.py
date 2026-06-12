@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from mmbot.core.config import InventorySettings, OrderSizeSettings, SpreadSettings
+from mmbot.core.config import InventorySettings, OrderLayerSettings, OrderSizeSettings, SpreadSettings
 
 
 @dataclass(frozen=True)
@@ -83,15 +83,18 @@ class LiquidityPlacementLayer:
 
 
 class OrderLadderEngine:
-    def __init__(self, settings: OrderSizeSettings):
+    def __init__(self, settings: OrderSizeSettings, layers: OrderLayerSettings):
         self.settings = settings
+        self.layers = layers
 
     def build(self, symbol: str, mid_price: float, spread_bps: float, inventory_skew_bps: float, volatility_buffer_bps: float, liquidity_imbalance: float) -> list[Quote]:
         quotes: list[Quote] = []
         protection = PriceProtectionLayer()
         liquidity = LiquidityPlacementLayer()
-        for level in range(1, self.settings.ladder_levels + 1):
-            level_spread = spread_bps * level + volatility_buffer_bps
+        levels = min(self.settings.ladder_levels, self.layers.enabled_levels, self.layers.max_active_orders_per_side)
+        for level in range(1, levels + 1):
+            spacing = self.layers.spacing_bps * (level - 1) * self.layers.outer_level_multiplier
+            level_spread = spread_bps + spacing + volatility_buffer_bps
             quantity = min(self.settings.max_order_size, max(self.settings.min_order_size, self.settings.base_order_size * (self.settings.ladder_size_multiplier ** (level - 1))))
             bid_bps = level_spread / 2 + inventory_skew_bps
             ask_bps = level_spread / 2 - inventory_skew_bps
@@ -110,11 +113,26 @@ class OrderLadderEngine:
 
 
 class QuoteEngine:
-    def __init__(self, spread: SpreadSettings, order_size: OrderSizeSettings, inventory: InventorySettings):
+    def __init__(self, spread: SpreadSettings, order_size: OrderSizeSettings, inventory: InventorySettings, order_layers: OrderLayerSettings | None = None):
+        if order_layers is None:
+            order_layers = OrderLayerSettings(enabled_levels=order_size.ladder_levels, spacing_bps=spread.base_spread_bps, outer_level_multiplier=1.25, refresh_threshold_bps=5, max_active_orders_per_side=order_size.ladder_levels)
+        self.spread_settings = spread
+        self.order_size_settings = order_size
+        self.inventory_settings = inventory
+        self.order_layer_settings = order_layers
         self.spread_engine = SpreadEngine(spread)
         self.inventory_skew = InventorySkewEngine(inventory)
         self.volatility_adjustment = VolatilityAdjustmentEngine()
-        self.ladder = OrderLadderEngine(order_size)
+        self.ladder = OrderLadderEngine(order_size, order_layers)
+
+    def update_settings(self, spread: SpreadSettings, order_size: OrderSizeSettings, inventory: InventorySettings, order_layers: OrderLayerSettings) -> None:
+        self.spread_settings = spread
+        self.order_size_settings = order_size
+        self.inventory_settings = inventory
+        self.order_layer_settings = order_layers
+        self.spread_engine = SpreadEngine(spread)
+        self.inventory_skew = InventorySkewEngine(inventory)
+        self.ladder = OrderLadderEngine(order_size, order_layers)
 
     def generate_quotes(self, market: MarketState, inventory: InventoryState) -> list[Quote]:
         spread_bps = self.spread_engine.adjusted_spread_bps(market)

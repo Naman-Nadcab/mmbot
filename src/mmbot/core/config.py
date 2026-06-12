@@ -6,7 +6,7 @@ import sys
 from functools import lru_cache
 from typing import Annotated, Any, Dict, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 AppEnv = Literal["development", "staging", "production", "test"]
@@ -126,6 +126,21 @@ class SpreadSettings(BaseModel):
     max_spread_bps: float = Field(gt=0)
     volatility_multiplier: float = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_spread_bounds(self) -> "SpreadSettings":
+        if not self.min_spread_bps <= self.base_spread_bps <= self.max_spread_bps:
+            raise ValueError("spread must satisfy min_spread_bps <= base_spread_bps <= max_spread_bps")
+        return self
+
+
+class StrategySettings(BaseModel):
+    trading_enabled: bool = True
+    quoting_enabled: bool = True
+    passive_only: bool = True
+    cancel_replace_enabled: bool = True
+    quote_refresh_seconds: float = Field(gt=0)
+    stale_market_data_seconds: float = Field(gt=0)
+
 
 class OrderSizeSettings(BaseModel):
     base_order_size: float = Field(gt=0)
@@ -133,6 +148,20 @@ class OrderSizeSettings(BaseModel):
     max_order_size: float = Field(gt=0)
     ladder_levels: int = Field(ge=1, le=50)
     ladder_size_multiplier: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_order_size_bounds(self) -> "OrderSizeSettings":
+        if not self.min_order_size <= self.base_order_size <= self.max_order_size:
+            raise ValueError("order size must satisfy min_order_size <= base_order_size <= max_order_size")
+        return self
+
+
+class OrderLayerSettings(BaseModel):
+    enabled_levels: int = Field(ge=1, le=50)
+    spacing_bps: float = Field(gt=0)
+    outer_level_multiplier: float = Field(ge=1)
+    refresh_threshold_bps: float = Field(gt=0)
+    max_active_orders_per_side: int = Field(ge=1, le=100)
 
 
 class InventorySettings(BaseModel):
@@ -148,8 +177,20 @@ class RiskSettings(BaseModel):
     max_order_notional: float = Field(gt=0)
     max_open_orders: int = Field(ge=1)
     max_daily_loss: float = Field(gt=0)
+    max_position_quantity: float = Field(gt=0)
+    circuit_breaker_enabled: bool = True
     circuit_breaker_error_threshold: int = Field(ge=1)
     circuit_breaker_cooldown_seconds: int = Field(ge=1)
+    auto_recovery_enabled: bool = False
+    auto_recovery_cooldown_seconds: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_risk_hierarchy(self) -> "RiskSettings":
+        if self.max_order_notional > self.max_position_notional:
+            raise ValueError("max_order_notional cannot exceed max_position_notional")
+        if self.max_position_notional > self.max_total_exposure:
+            raise ValueError("max_position_notional cannot exceed max_total_exposure")
+        return self
 
 
 class ExchangeSettings(BaseModel):
@@ -163,6 +204,28 @@ class LiquiditySettings(BaseModel):
     depth_levels: int = Field(ge=1, le=200)
     imbalance_threshold: float = Field(gt=0, le=1)
     min_top_of_book_depth: float = Field(ge=0)
+    target_depth_notional: float = Field(gt=0)
+    build_liquidity: bool = True
+
+
+class VolumeSettings(BaseModel):
+    enabled: bool = False
+    hourly_target_notional: float = Field(ge=0)
+    daily_target_notional: float = Field(ge=0)
+    weekly_target_notional: float = Field(ge=0)
+    max_participation_rate: float = Field(gt=0, le=0.2)
+    pressure_threshold: float = Field(gt=0, le=1)
+    max_size_multiplier: float = Field(ge=1, le=5)
+    min_seconds_between_pressure_orders: int = Field(ge=1)
+    external_volume_required: bool = True
+
+    @model_validator(mode="after")
+    def validate_volume_targets(self) -> "VolumeSettings":
+        if self.daily_target_notional and self.hourly_target_notional > self.daily_target_notional:
+            raise ValueError("hourly_target_notional cannot exceed daily_target_notional")
+        if self.weekly_target_notional and self.daily_target_notional > self.weekly_target_notional:
+            raise ValueError("daily_target_notional cannot exceed weekly_target_notional")
+        return self
 
 
 class AlertSettings(BaseModel):
@@ -172,8 +235,11 @@ class AlertSettings(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
+    strategy: StrategySettings
     spread: SpreadSettings
+    order_layers: OrderLayerSettings
     order_size: OrderSizeSettings
+    volume: VolumeSettings
     inventory: InventorySettings
     risk: RiskSettings
     exchange: ExchangeSettings
@@ -183,12 +249,15 @@ class RuntimeConfig(BaseModel):
 
 def default_runtime_config() -> RuntimeConfig:
     return RuntimeConfig(
+        strategy=StrategySettings(trading_enabled=True, quoting_enabled=True, passive_only=True, cancel_replace_enabled=True, quote_refresh_seconds=5.0, stale_market_data_seconds=30.0),
         spread=SpreadSettings(base_spread_bps=20, min_spread_bps=5, max_spread_bps=200, volatility_multiplier=1.5),
+        order_layers=OrderLayerSettings(enabled_levels=3, spacing_bps=20, outer_level_multiplier=1.25, refresh_threshold_bps=5, max_active_orders_per_side=3),
         order_size=OrderSizeSettings(base_order_size=0.01, min_order_size=0.001, max_order_size=1.0, ladder_levels=3, ladder_size_multiplier=1.25),
+        volume=VolumeSettings(enabled=False, hourly_target_notional=0, daily_target_notional=0, weekly_target_notional=0, max_participation_rate=0.05, pressure_threshold=0.2, max_size_multiplier=2.0, min_seconds_between_pressure_orders=30, external_volume_required=True),
         inventory=InventorySettings(target_base_ratio=0.5, skew_intensity=0.75, max_asset_exposure=100000, alert_threshold_ratio=0.8),
-        risk=RiskSettings(max_position_notional=100000, max_total_exposure=250000, max_order_notional=25000, max_open_orders=100, max_daily_loss=10000, circuit_breaker_error_threshold=5, circuit_breaker_cooldown_seconds=300),
+        risk=RiskSettings(max_position_notional=100000, max_total_exposure=250000, max_order_notional=25000, max_open_orders=100, max_daily_loss=10000, max_position_quantity=100, circuit_breaker_enabled=True, circuit_breaker_error_threshold=5, circuit_breaker_cooldown_seconds=300, auto_recovery_enabled=False, auto_recovery_cooldown_seconds=900),
         exchange=ExchangeSettings(enabled_exchanges=["binance", "coinstore", "mexc", "gate", "bitmart", "kucoin"], default_timeout_seconds=10, max_reconnect_delay_seconds=30, heartbeat_interval_seconds=20),
-        liquidity=LiquiditySettings(depth_levels=20, imbalance_threshold=0.35, min_top_of_book_depth=0),
+        liquidity=LiquiditySettings(depth_levels=20, imbalance_threshold=0.35, min_top_of_book_depth=0, target_depth_notional=50000, build_liquidity=True),
         alert=AlertSettings(enabled_channels=["telegram", "dashboard"], min_severity="warning", telegram_enabled=True),
     )
 

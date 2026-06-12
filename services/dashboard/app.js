@@ -1,23 +1,50 @@
+const pages = [
+  ['overview', 'Overview'],
+  ['strategy', 'Strategy'],
+  ['spread', 'Spread'],
+  ['layers', 'Layers'],
+  ['order-size', 'Order Size'],
+  ['volume', 'Volume'],
+  ['liquidity', 'Liquidity'],
+  ['inventory', 'Inventory'],
+  ['risk', 'Risk'],
+  ['coinstore', 'Coinstore'],
+  ['emergency', 'Emergency']
+];
+
+const configDomains = {
+  strategy: [
+    ['trading_enabled', 'boolean'], ['quoting_enabled', 'boolean'], ['passive_only', 'boolean'],
+    ['cancel_replace_enabled', 'boolean'], ['quote_refresh_seconds', 'number'], ['stale_market_data_seconds', 'number']
+  ],
+  spread: [['base_spread_bps', 'number'], ['min_spread_bps', 'number'], ['max_spread_bps', 'number'], ['volatility_multiplier', 'number']],
+  order_layers: [['enabled_levels', 'number'], ['spacing_bps', 'number'], ['outer_level_multiplier', 'number'], ['refresh_threshold_bps', 'number'], ['max_active_orders_per_side', 'number']],
+  order_size: [['base_order_size', 'number'], ['min_order_size', 'number'], ['max_order_size', 'number'], ['ladder_levels', 'number'], ['ladder_size_multiplier', 'number']],
+  volume: [['enabled', 'boolean'], ['hourly_target_notional', 'number'], ['daily_target_notional', 'number'], ['weekly_target_notional', 'number'], ['max_participation_rate', 'number'], ['pressure_threshold', 'number'], ['max_size_multiplier', 'number'], ['min_seconds_between_pressure_orders', 'number'], ['external_volume_required', 'boolean']],
+  liquidity: [['depth_levels', 'number'], ['imbalance_threshold', 'number'], ['min_top_of_book_depth', 'number'], ['target_depth_notional', 'number'], ['build_liquidity', 'boolean']],
+  inventory: [['target_base_ratio', 'number'], ['skew_intensity', 'number'], ['max_asset_exposure', 'number'], ['alert_threshold_ratio', 'number']],
+  risk: [['max_position_notional', 'number'], ['max_total_exposure', 'number'], ['max_order_notional', 'number'], ['max_open_orders', 'number'], ['max_daily_loss', 'number'], ['max_position_quantity', 'number'], ['circuit_breaker_enabled', 'boolean'], ['circuit_breaker_error_threshold', 'number'], ['circuit_breaker_cooldown_seconds', 'number'], ['auto_recovery_enabled', 'boolean'], ['auto_recovery_cooldown_seconds', 'number']],
+  exchange: [['enabled_exchanges', 'csv'], ['default_timeout_seconds', 'number'], ['max_reconnect_delay_seconds', 'number'], ['heartbeat_interval_seconds', 'number']],
+  alert: [['enabled_channels', 'csv'], ['min_severity', 'text'], ['telegram_enabled', 'boolean']]
+};
+
 const state = {
   apiBase: normalizeApiBase(localStorage.getItem('ops.apiBase') || '/api'),
   token: normalizeToken(localStorage.getItem('ops.token') || ''),
   wsUrl: localStorage.getItem('ops.wsUrl') || defaultWsUrl(),
   socket: null,
-  wsReconnectTimer: null,
   manualDisconnect: false,
+  wsReconnectTimer: null,
+  config: {},
+  versions: {},
   lastEvents: [],
-  history: { pnl: [], inventory: [], marketMessages: [] },
+  history: { pnl: [], inventory: [] },
   pagination: { orders: { page: 0, size: 50 }, trades: { page: 0, size: 50 } },
-  data: {
-    positions: [], orders: [], trades: [], riskEvents: [], reconciliation: [],
-    engines: {}, exchanges: {}, infrastructure: {}, pnl: null, inventory: null, mode: null
-  }
+  data: { engines: {}, infrastructure: {}, exchanges: {}, orders: [], trades: [], positions: [], inventory: null, pnl: null, riskEvents: [], auditLogs: [], volume: null, coinstore: {}, kill: null }
 };
 
-window.__dashboardRequestEvidence = window.__dashboardRequestEvidence || [];
-window.__dashboardFirst401 = window.__dashboardFirst401 || null;
-
 const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const emptyRow = (cols) => `<tr><td colspan="${cols}" class="empty">No records returned by backend</td></tr>`;
 
 function defaultWsUrl() {
@@ -30,161 +57,140 @@ function normalizeApiBase(value) {
   return base.length > 1 ? base.replace(/\/+$/g, '') : base;
 }
 
-function syncStoredAuthState() {
-  state.apiBase = normalizeApiBase(localStorage.getItem('ops.apiBase') || state.apiBase || '/api');
-  const storedToken = normalizeToken(localStorage.getItem('ops.token') || state.token || '');
-  if (storedToken !== state.token) {
-    state.token = storedToken;
-    const tokenInput = $('bearer-token');
-    if (tokenInput) tokenInput.value = storedToken;
-  }
+function normalizeToken(value) {
+  return String(value || '').trim().replace(/^Bearer\s+/i, '').replace(/^['"]|['"]$/g, '').replace(/\s+/g, '');
 }
 
-function headers() {
-  syncStoredAuthState();
-  const h = { 'Accept': 'application/json' };
-  if (state.token) {
-    console.info('jwt_auth_diagnostics', tokenDiagnostics('rest_authorization_header', state.token));
-    h.Authorization = `Bearer ${state.token}`;
-  }
+function headers(json = false) {
+  const h = { Accept: 'application/json' };
+  if (json) h['Content-Type'] = 'application/json';
+  if (state.token) h.Authorization = `Bearer ${state.token}`;
   return h;
 }
 
-function normalizeToken(value) {
-  return String(value || '')
-    .trim()
-    .replace(/^Bearer\s+/i, '')
-    .replace(/^['"]|['"]$/g, '')
-    .replace(/\s+/g, '')
-    .trim();
-}
-
-function tokenDiagnostics(stage, token) {
-  const value = String(token || '');
-  return {
-    stage,
-    length: value.length,
-    segments: value ? value.split('.').length : 0,
-    hasWhitespace: /\s/.test(value),
-    startsWithBearer: /^Bearer\s+/i.test(value),
-    hasWrappingQuotes: /^['"].*['"]$/.test(value),
-    prefix: value.slice(0, 8),
-    suffix: value.slice(-8)
-  };
-}
-
-function setPill(id, text, status = 'neutral') {
-  const el = $(id);
-  el.textContent = text;
-  el.className = `pill ${status}`;
+async function request(path, options = {}) {
+  const response = await fetch(`${state.apiBase}${path}`, { ...options, headers: { ...headers(Boolean(options.body)), ...(options.headers || {}) } });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`${path} ${response.status} ${text.slice(0, 180)}`);
+  }
+  return response.status === 204 ? null : response.json();
 }
 
 function logEvent(message, payload) {
   const line = `[${new Date().toISOString()}] ${message}${payload ? ' ' + JSON.stringify(payload) : ''}`;
   state.lastEvents.unshift(line);
-  state.lastEvents = state.lastEvents.slice(0, 120);
+  state.lastEvents = state.lastEvents.slice(0, 160);
   $('event-log').textContent = state.lastEvents.join('\n');
 }
 
-function recordRequestEvidence(entry) {
-  const evidence = {
-    timestamp: new Date().toISOString(),
-    ...entry
-  };
-  window.__dashboardRequestEvidence.push(evidence);
-  if (evidence.status === 401 && !window.__dashboardFirst401) {
-    window.__dashboardFirst401 = evidence;
-  }
-  console.info('dashboard_request_evidence', evidence);
+function setPill(id, text, status = 'neutral') {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = `status-chip ${status}`;
 }
 
-async function request(path) {
-  syncStoredAuthState();
-  const url = `${state.apiBase}${path}`;
-  const requestHeaders = headers();
-  const authAttached = Boolean(requestHeaders.Authorization);
-  try {
-    const response = await fetch(url, { headers: requestHeaders });
-    recordRequestEvidence({
-      url,
-      status: response.status,
-      authAttached,
-      usedRequest: true,
-      bypassedRequest: false,
-      functionName: 'request',
-      sourceLine: 'services/dashboard/app.js:request'
-    });
-    if (!response.ok) throw new Error(`${path} ${response.status}`);
-    return response.json();
-  } catch (error) {
-    if (!window.__dashboardRequestEvidence.some((item) => item.url === url && item.status !== undefined)) {
-      recordRequestEvidence({
-        url,
-        status: null,
-        authAttached,
-        usedRequest: true,
-        bypassedRequest: false,
-        functionName: 'request',
-        sourceLine: 'services/dashboard/app.js:request',
-        error: error.message
-      });
-    }
-    throw error;
+function initNav() {
+  $('main-nav').innerHTML = pages.map(([id, label]) => `<button type="button" class="nav-tab ${id === 'overview' ? 'active' : ''}" data-page="${id}">${label}</button>`).join('');
+  $('main-nav').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-page]');
+    if (!button) return;
+    document.querySelectorAll('.nav-tab').forEach((item) => item.classList.toggle('active', item === button));
+    document.querySelectorAll('.page').forEach((item) => item.classList.toggle('active', item.id === `page-${button.dataset.page}`));
+  });
+}
+
+function initConfigForms() {
+  for (const [domain, fields] of Object.entries(configDomains)) {
+    const panel = $(`${domain}-panel`);
+    if (!panel) continue;
+    panel.innerHTML = `
+      <article class="glass-panel data-panel">
+        <div class="panel-header"><h2>${title(domain)} Control</h2><span id="${domain}-version" class="pill neutral">version loading</span></div>
+        <form id="${domain}-form" class="form-grid config-form" data-domain="${domain}">
+          ${fields.map(([name, type]) => control(domain, name, type)).join('')}
+          <label>Change Reason<input name="__reason" value="operator runtime update" /></label>
+          <div class="button-row"><button type="submit">Apply Runtime Change</button><button type="button" class="secondary" data-reload="${domain}">Reload From Backend</button></div>
+        </form>
+        ${domain === 'strategy' ? '<div class="button-row strategy-command-row"><button type="button" data-strategy-command="start">Start</button><button type="button" class="secondary" data-strategy-command="pause">Pause</button><button type="button" class="secondary" data-strategy-command="resume">Resume</button><button type="button" class="danger" data-strategy-command="stop">Stop</button></div>' : ''}
+      </article>`;
+    $(`${domain}-form`).addEventListener('submit', saveConfig);
+    panel.querySelector('[data-reload]').addEventListener('click', () => loadConfigDomain(domain));
+    panel.querySelectorAll('[data-strategy-command]').forEach((button) => button.addEventListener('click', () => sendStrategy(button.dataset.strategyCommand)));
   }
+}
+
+function control(domain, name, type) {
+  const label = title(name);
+  if (type === 'boolean') {
+    return `<label>${label}<select name="${name}" id="${domain}-${name}"><option value="true">true</option><option value="false">false</option></select></label>`;
+  }
+  return `<label>${label}<input name="${name}" id="${domain}-${name}" type="${type === 'number' ? 'number' : 'text'}" step="any" autocomplete="off" /></label>`;
+}
+
+async function loadConfig() {
+  if (!state.token) return;
+  await Promise.all(Object.keys(configDomains).map((domain) => loadConfigDomain(domain).catch((error) => logEvent('config_load_failed', { domain, error: error.message }))));
+}
+
+async function loadConfigDomain(domain) {
+  const payload = await request(`/admin/config/${domain}`);
+  state.config[domain] = payload.config || {};
+  state.versions[domain] = payload.version;
+  fillConfigForm(domain);
+}
+
+function fillConfigForm(domain) {
+  const config = state.config[domain] || {};
+  const version = $(`${domain}-version`);
+  if (version) version.textContent = `version ${state.versions[domain] ?? 0}`;
+  for (const [name, type] of configDomains[domain] || []) {
+    const el = $(`${domain}-${name}`);
+    if (!el) continue;
+    const value = config[name];
+    el.value = type === 'csv' ? (Array.isArray(value) ? value.join(',') : String(value ?? '')) : String(value ?? '');
+  }
+}
+
+async function saveConfig(event) {
+  event.preventDefault();
+  const form = event.target;
+  const domain = form.dataset.domain;
+  const config = {};
+  for (const [name, type] of configDomains[domain]) {
+    const raw = form.elements[name].value;
+    config[name] = type === 'number' ? Number(raw) : type === 'boolean' ? raw === 'true' : type === 'csv' ? raw.split(',').map((item) => item.trim()).filter(Boolean) : raw;
+  }
+  const saved = await request(`/admin/config/${domain}`, { method: 'PUT', body: JSON.stringify({ config }) });
+  state.config[domain] = saved.config;
+  state.versions[domain] = saved.version;
+  fillConfigForm(domain);
+  logEvent('runtime_config_updated', { domain, version: saved.version });
+  await refreshOperations();
 }
 
 async function refreshRest() {
-  syncStoredAuthState();
   try {
     const health = await request('/health');
     state.data.infrastructure.api = health.status;
-    state.data.infrastructure.database = health.dependencies?.database || 'unknown';
-    state.data.infrastructure.redis = health.dependencies?.redis || 'unknown';
+    state.data.infrastructure.database = health.dependencies?.database;
+    state.data.infrastructure.redis = health.dependencies?.redis;
     setPill('api-status', `API ${health.status}`, health.status === 'ok' ? 'ok' : 'warn');
-    renderInfrastructure();
   } catch (error) {
     setPill('api-status', 'API unavailable', 'bad');
-    state.data.infrastructure.api = error.message;
-    renderInfrastructure();
+    logEvent('health_unavailable', { error: error.message });
   }
-
-  try {
-    const version = await request('/version');
-    state.data.infrastructure.version = version.version;
-    renderInfrastructure();
-  } catch (error) {
-    state.data.infrastructure.version = 'unavailable';
-  }
-
-  try {
-    const ready = await request('/ready');
-    state.data.infrastructure.ready = ready.status;
-    renderInfrastructure();
-  } catch (error) {
-    state.data.infrastructure.ready = error.message;
-  }
-
-  await refreshOperations();
-
   if (state.token) {
-    try {
-      renderKillSwitch(await request('/operations/kill-switch'));
-    } catch (error) {
-      logEvent('kill_switch_status_unavailable', { error: error.message });
-    }
+    await Promise.all([loadConfig(), refreshOperations(), refreshCoinstore()].map((p) => p.catch((error) => logEvent('refresh_error', { error: error.message }))));
   }
+  renderAll();
 }
 
 async function refreshOperations() {
-  syncStoredAuthState();
-  if (!state.token) {
-    setPill('ws-status', 'Token required', 'warn');
-    logEvent('operations_auth_required', { message: 'Enter and save a JWT bearer token to load protected operations data.' });
-    return;
-  }
   const calls = [
     ['engines', '/operations/engines'],
-    ['infrastructureDetails', '/operations/infrastructure'],
+    ['infrastructure', '/operations/infrastructure'],
     ['exchanges', '/operations/exchanges'],
     ['orders', '/operations/orders?limit=500'],
     ['trades', '/operations/trades?limit=500'],
@@ -192,303 +198,272 @@ async function refreshOperations() {
     ['inventory', '/operations/inventory'],
     ['pnl', '/operations/pnl'],
     ['riskEvents', '/operations/risk-events'],
-    ['reconciliationPayload', '/operations/reconciliation'],
-    ['canaryLimits', '/operations/canary-limits']
+    ['auditLogs', '/operations/audit-logs?limit=100'],
+    ['volume', '/operations/volume'],
+    ['kill', '/operations/kill-switch']
   ];
   for (const [key, path] of calls) {
     try {
       const payload = await request(path);
-      if (key === 'engines') {
-        state.data.engines = payload.engines || {};
-        sampleThroughput(payload);
-      }
-      else if (key === 'infrastructureDetails') state.data.infrastructure = { ...state.data.infrastructure, ...payload };
+      if (key === 'orders' || key === 'trades' || key === 'positions' || key === 'riskEvents' || key === 'auditLogs') state.data[key] = payload.items || [];
+      else if (key === 'engines') state.data.engines = payload.engines || {};
       else if (key === 'exchanges') state.data.exchanges = payload.exchanges || {};
-      else if (key === 'orders') state.data.orders = payload.items || [];
-      else if (key === 'trades') state.data.trades = payload.items || [];
-      else if (key === 'positions') state.data.positions = payload.items || [];
-      else if (key === 'inventory') state.data.inventory = payload;
-      else if (key === 'pnl') state.data.pnl = payload;
-      else if (key === 'riskEvents') state.data.riskEvents = payload.items || [];
-      else if (key === 'canaryLimits') renderCanaryLimits(payload);
-      else if (key === 'reconciliationPayload') {
-        state.data.reconciliation = reconciliationRows(payload);
-        state.data.reconciliationStatus = `${payload.status} (${payload.runs} runs)`;
-      }
+      else state.data[key] = payload;
     } catch (error) {
-      logEvent('operations_endpoint_unavailable', { endpoint: path, error: error.message });
+      logEvent('operations_endpoint_unavailable', { path, error: error.message });
     }
   }
-  sampleHistory();
-  renderAll();
 }
 
 function connectWebSocket() {
   disconnectWebSocket();
   state.manualDisconnect = false;
-  syncStoredAuthState();
   if (!state.token) {
     setPill('ws-status', 'Token required', 'warn');
-    logEvent('websocket_auth_required', { message: 'Enter and save a JWT bearer token before opening the operations stream.' });
     return;
   }
-  state.wsUrl = $('ws-url').value.trim();
+  state.wsUrl = $('ws-url').value.trim() || defaultWsUrl();
   localStorage.setItem('ops.wsUrl', state.wsUrl);
-  if (!state.wsUrl) return;
-  try {
-    const url = new URL(state.wsUrl, window.location.href);
-    if (state.token) {
-      console.info('jwt_auth_diagnostics', tokenDiagnostics('websocket_query_token', state.token));
-      url.searchParams.set('token', state.token);
-    }
-    recordRequestEvidence({
-      url: url.toString(),
-      status: 'websocket_opening',
-      authAttached: Boolean(state.token),
-      usedRequest: false,
-      bypassedRequest: true,
-      functionName: 'connectWebSocket',
-      sourceLine: 'services/dashboard/app.js:connectWebSocket'
-    });
-    const socket = new WebSocket(url.toString());
-    state.socket = socket;
-    setPill('ws-status', 'WebSocket connecting', 'warn');
-    socket.onopen = () => { setPill('ws-status', 'WebSocket connected', 'ok'); logEvent('websocket_connected', { url: state.wsUrl }); };
-    socket.onclose = () => {
-      setPill('ws-status', 'WebSocket disconnected', 'warn');
-      logEvent('websocket_disconnected');
-      if (!state.manualDisconnect) scheduleWebSocketReconnect();
-    };
-    socket.onerror = () => { setPill('ws-status', 'WebSocket error', 'bad'); logEvent('websocket_error'); };
-    socket.onmessage = (event) => handleStreamMessage(event.data);
-  } catch (error) {
-    setPill('ws-status', 'WebSocket error', 'bad');
-    logEvent('websocket_connect_failed', { error: error.message });
-  }
+  const url = new URL(state.wsUrl, window.location.href);
+  url.searchParams.set('token', state.token);
+  const socket = new WebSocket(url.toString());
+  state.socket = socket;
+  setPill('ws-status', 'WebSocket connecting', 'warn');
+  socket.onopen = () => { setPill('ws-status', 'WebSocket connected', 'ok'); logEvent('websocket_connected'); };
+  socket.onerror = () => { setPill('ws-status', 'WebSocket error', 'bad'); };
+  socket.onclose = () => {
+    setPill('ws-status', 'WebSocket disconnected', 'warn');
+    if (!state.manualDisconnect) state.wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+  };
+  socket.onmessage = (event) => handleStreamMessage(event.data);
 }
 
 function disconnectWebSocket() {
   state.manualDisconnect = true;
   if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
-  state.wsReconnectTimer = null;
   if (state.socket) state.socket.close();
   state.socket = null;
 }
 
-function scheduleWebSocketReconnect() {
-  if (state.wsReconnectTimer) return;
-  state.wsReconnectTimer = setTimeout(() => {
-    state.wsReconnectTimer = null;
-    connectWebSocket();
-  }, 3000);
-}
-
 function handleStreamMessage(raw) {
   let message;
-  try { message = JSON.parse(raw); } catch { logEvent('stream_non_json_message', { raw }); return; }
-  const type = message.type || message.event_type || message.event || 'unknown';
+  try { message = JSON.parse(raw); } catch { return; }
+  const type = message.type || message.event_type || 'unknown';
   const payload = message.payload || message.data || message;
   logEvent(type, payload);
-  switch (type) {
-    case 'pnl': state.data.pnl = payload; break;
-    case 'positions': state.data.positions = payload.items || payload.positions || []; break;
-    case 'inventory': state.data.inventory = payload; break;
-    case 'orders': state.data.orders = payload.items || payload.orders || []; break;
-    case 'trades': state.data.trades = payload.items || payload.trades || []; break;
-    case 'risk_events': state.data.riskEvents = payload.items || payload.events || []; break;
-    case 'engine_health': state.data.engines = payload.engines || payload; sampleThroughput(payload); break;
-    case 'exchange_connectivity': state.data.exchanges = payload.exchanges || payload; break;
-    case 'infrastructure': state.data.infrastructure = { ...state.data.infrastructure, ...payload }; break;
-    case 'reconciliation': state.data.reconciliation = reconciliationRows(payload); state.data.reconciliationStatus = `${payload.status} (${payload.runs ?? 0} runs)`; break;
-    case 'mode': state.data.mode = payload.mode || payload; break;
-    default: break;
-  }
+  if (type === 'pnl') state.data.pnl = payload;
+  if (type === 'positions') state.data.positions = payload.items || [];
+  if (type === 'inventory') state.data.inventory = payload;
+  if (type === 'orders') state.data.orders = payload.items || [];
+  if (type === 'trades') state.data.trades = payload.items || [];
+  if (type === 'risk_events') state.data.riskEvents = payload.items || [];
+  if (type === 'engine_health') state.data.engines = payload.engines || {};
+  if (type === 'exchange_connectivity') state.data.exchanges = payload.exchanges || {};
   renderAll();
 }
 
+async function refreshCoinstore() {
+  try { state.data.coinstore.accounts = (await request('/admin/coinstore/accounts')).items || []; } catch (error) { logEvent('coinstore_accounts_unavailable', { error: error.message }); }
+  try { state.data.coinstore.health = await request('/admin/coinstore/health'); } catch (error) { state.data.coinstore.health = { rest: { status: 'unavailable', error: error.message } }; }
+}
+
+function initCoinstore() {
+  $('coinstore-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const payload = {
+      account_alias: form.account_alias.value.trim(),
+      environment: form.environment.value,
+      api_key: form.api_key.value,
+      api_secret: form.api_secret.value,
+      passphrase: form.passphrase.value || null,
+      permissions: form.permissions.value.split(',').map((item) => item.trim()).filter(Boolean),
+      is_enabled: form.is_enabled.value === 'true'
+    };
+    const saved = await request('/admin/coinstore/accounts', { method: 'POST', body: JSON.stringify(payload) });
+    form.api_key.value = '';
+    form.api_secret.value = '';
+    form.passphrase.value = '';
+    logEvent('coinstore_account_saved', { id: saved.id, alias: saved.account_alias });
+    await refreshCoinstore();
+    renderCoinstore();
+  });
+  $('coinstore-health').addEventListener('click', async () => { state.data.coinstore.health = await request('/admin/coinstore/health'); renderCoinstore(); });
+  $('coinstore-sync').addEventListener('click', async () => {
+    const confirmation = prompt('Type sync to confirm Coinstore balance sync');
+    if (!confirmation) return;
+    const result = await request('/admin/coinstore/balance-sync', { method: 'POST', body: JSON.stringify({ confirmation, reason: 'operator balance sync' }) });
+    logEvent('coinstore_balance_sync', result);
+    await refreshOperations();
+  });
+}
+
+function initEmergency() {
+  const actions = [
+    ['cancel-all-orders', 'Cancel All Orders', 'cancel', '/admin/emergency/cancel-all-orders'],
+    ['disable-trading', 'Disable Trading', 'disable', '/admin/emergency/disable-trading'],
+    ['enable-trading', 'Enable Trading', 'enable', '/admin/emergency/enable-trading'],
+    ['close-positions', 'Close Positions', 'close', '/admin/emergency/close-positions'],
+    ['runtime-restart', 'Runtime Restart', 'restart', '/admin/emergency/runtime-restart'],
+    ['shutdown', 'Emergency Shutdown', 'shutdown', '/admin/emergency/shutdown']
+  ];
+  $('emergency-actions').innerHTML = actions.map(([id, label, word]) => `
+    <form class="emergency-card" data-endpoint="${id}" data-word="${word}">
+      <h3>${label}</h3>
+      <label>Reason<input name="reason" value="operator confirmed ${label.toLowerCase()}" /></label>
+      <label>Confirmation<input name="confirmation" placeholder="must include '${word}'" /></label>
+      <button type="submit" class="${id === 'enable-trading' ? 'secondary' : 'danger'}">${label}</button>
+    </form>`).join('');
+  $('emergency-actions').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const endpoint = actions.find(([id]) => id === form.dataset.endpoint)[3];
+    const result = await request(endpoint, { method: 'POST', body: JSON.stringify({ confirmation: form.confirmation.value, reason: form.reason.value }) });
+    $('kill-output').textContent = JSON.stringify(result, null, 2);
+    logEvent('emergency_action_accepted', { endpoint });
+    await refreshOperations();
+  });
+}
+
+async function sendStrategy(command) {
+  const result = await request('/admin/strategy/command', { method: 'POST', body: JSON.stringify({ command, confirmation: command, reason: `operator ${command}` }) });
+  logEvent('strategy_command', result.state);
+}
+
 function renderAll() {
-  renderPnl(); renderPositions(); renderOrders(); renderTrades(); renderRisk(); renderEngines();
-  renderExchanges(); renderInfrastructure(); renderReconciliation(); renderMode(); renderInventory(); renderCharts(); renderLatencyAndThroughput(); renderDailyVolume();
+  renderPnl();
+  renderInventory();
+  renderOrders();
+  renderTrades();
+  renderRisk();
+  renderAudit();
+  renderEngines();
+  renderInfrastructure();
+  renderExchanges();
+  renderVolume();
+  renderCoinstore();
 }
 
 function renderPnl() {
   const pnl = state.data.pnl;
-  $('pnl-value').textContent = pnl ? formatMoney(pnl.total ?? pnl.unrealized ?? pnl.realized) : formatMoney(0);
-  $('pnl-subtitle').textContent = pnl ? `realized ${formatMoney(pnl.realized)} / unrealized ${formatMoney(pnl.unrealized)}` : 'realized / unrealized';
-  $('unrealized-pnl-value').textContent = pnl ? formatMoney(pnl.unrealized) : formatMoney(0);
+  $('pnl-value').textContent = pnl ? money(pnl.total ?? pnl.unrealized ?? pnl.realized) : money(0);
+  $('pnl-subtitle').textContent = pnl ? `realized ${money(pnl.realized)} / unrealized ${money(pnl.unrealized)}` : 'realized / unrealized';
+  if (pnl) pushSample(state.history.pnl, Number(pnl.total || 0));
+  renderAreaChart('pnl-chart', state.history.pnl);
 }
 
 function renderInventory() {
   const inv = state.data.inventory;
-  $('inventory-exposure').textContent = inv ? formatMoney(inv.exposure_notional ?? inv.total_notional) : formatMoney(0);
-  $('inventory-subtitle').textContent = inv ? `${(inv.items || []).length} inventory snapshots` : '0 inventory snapshots';
+  $('inventory-exposure').textContent = inv ? money(inv.exposure_notional ?? inv.total_notional) : money(0);
+  $('inventory-subtitle').textContent = inv ? `${(inv.items || []).length} snapshots` : '0 snapshots';
+  if (inv) pushSample(state.history.inventory, Number(inv.exposure_notional || inv.total_notional || 0));
+  renderAreaChart('inventory-chart', state.history.inventory);
   const items = inv?.items || [];
-  $('inventory-detail').innerHTML = items.length ? items.slice(0, 8).map((item) => stackItem(item.asset, `${formatNumber(item.total_balance)} / ${formatMoney(item.valuation_amount)}`)).join('') : stackItem('Inventory', 'No records returned');
+  $('inventory-detail').innerHTML = items.length ? items.slice(0, 12).map((item) => stackItem(item.asset, `${num(item.total_balance)} / ${money(item.valuation_amount)}`)).join('') : stackItem('Inventory', 'No records returned by backend');
 }
 
-function renderMode(config) {
-  const mode = state.data.mode || config?.mode || config?.runtime?.mode || 'paper/canary/live unknown';
-  const text = typeof mode === 'string' ? mode : JSON.stringify(mode);
-  setPill('mode-pill', text, text.includes('live') ? 'bad' : text.includes('paper') ? 'ok' : 'neutral');
+function renderOrders() {
+  $('open-orders-count').textContent = String(state.data.orders.length || 0);
+  const items = pageSlice(state.data.orders, state.pagination.orders);
+  $('orders-body').innerHTML = rows(items, 6, (o) => `<tr><td>${esc(o.client_order_id || o.id)}</td><td>${esc(o.symbol)}</td><td>${esc(o.side)}</td><td>${esc(o.status)}</td><td>${num(o.price)}</td><td>${num(o.quantity)}</td></tr>`);
+  $('orders-page').textContent = `${state.pagination.orders.page + 1}/${pageCount(state.data.orders, state.pagination.orders)}`;
 }
 
-function renderInfrastructure() {
-  const infra = state.data.infrastructure;
-  $('infra-health').innerHTML = [
-    stackItem('API', infra.api || 'checking'),
-    stackItem('Database', infra.database || 'checking'),
-    stackItem('Redis', infra.redis || 'checking'),
-    stackItem('PostgreSQL', infra.postgres || infra.database || 'checking'),
-    stackItem('Readiness', infra.ready || 'checking'),
-    stackItem('Version', infra.version || 'unknown')
-  ].join('');
+function renderTrades() {
+  const items = pageSlice(state.data.trades, state.pagination.trades);
+  $('trades-body').innerHTML = rows(items, 6, (t) => `<tr><td>${esc(t.trade_id || t.id)}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${num(t.price)}</td><td>${num(t.quantity)}</td><td>${num(t.fee)}</td></tr>`);
+  $('trades-page').textContent = `${state.pagination.trades.page + 1}/${pageCount(state.data.trades, state.pagination.trades)}`;
+}
+
+function renderRisk() {
+  const risk = state.data.riskEvents || [];
+  $('risk-count').textContent = String(risk.length);
+  $('risk-body').innerHTML = rows(risk, 4, (r) => `<tr><td>${esc(r.severity)}</td><td>${esc(r.event_type)}</td><td>${esc(r.message)}</td><td>${esc(r.occurred_at)}</td></tr>`);
+  setPill('risk-summary', risk.length ? `${risk.length} risk events` : 'Risk normal', risk.some((r) => String(r.severity).includes('critical')) ? 'bad' : risk.length ? 'warn' : 'ok');
+}
+
+function renderAudit() {
+  $('audit-count').textContent = String((state.data.auditLogs || []).length);
 }
 
 function renderEngines() {
-  const engines = state.data.engines;
-  const entries = Object.entries(engines || {});
-  $('engine-health').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value?.status || value?.health_status || JSON.stringify(value))).join('') : stackItem('Engine Health', 'No engine health records returned');
-  $('engine-updated').textContent = entries.length ? 'Backend state' : 'No engine health records';
-  const allHealthy = entries.length && entries.every(([, value]) => String(value?.status || '').includes('healthy'));
-  if (entries.length) setPill('api-status', allHealthy ? 'Engines healthy' : 'Engines degraded', allHealthy ? 'ok' : 'warn');
+  const entries = Object.entries(state.data.engines || {});
+  $('engine-health').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value?.status || JSON.stringify(value))).join('') : stackItem('Engine Health', 'No engine health records returned');
+  const maker = state.data.engines['market-maker-engine'];
+  const runtime = maker?.runtime || {};
+  setPill('mode-pill', `${runtime.mode || 'mode unknown'} ${runtime.trading_enabled === false ? 'disabled' : 'enabled'}`, runtime.trading_enabled === false ? 'bad' : 'ok');
+}
+
+function renderInfrastructure() {
+  const infra = state.data.infrastructure || {};
+  $('infra-health').innerHTML = [stackItem('API', infra.api || 'checking'), stackItem('Database', infra.database || 'checking'), stackItem('Redis', infra.redis || 'checking'), stackItem('DB Latency', `${num(infra.database_latency_ms)} ms`), stackItem('Redis Latency', `${num(infra.redis_latency_ms)} ms`)].join('');
 }
 
 function renderExchanges() {
   const entries = Object.entries(state.data.exchanges || {});
-  $('exchange-connectivity').innerHTML = entries.length ? entries.map(([name, value]) => stackItem(name, value.status || value.detail || JSON.stringify(value))).join('') : stackItem('Exchanges', 'No exchange state returned');
-  const connected = entries.filter(([, value]) => String(value.status || '').includes('connected')).length;
-  $('exchange-summary').textContent = entries.length ? `${connected}/${entries.length} exchanges` : 'Exchanges loading';
-  $('exchange-summary').className = `status-chip ${connected ? 'ok' : 'neutral'}`;
+  const coinstore = state.data.coinstore.health;
+  const label = coinstore?.rest?.status || state.data.exchanges.coinstore?.status || 'Coinstore unknown';
+  setPill('exchange-summary', `Coinstore ${label}`, String(label).includes('healthy') || String(label).includes('connected') ? 'ok' : 'warn');
+  const kill = state.data.kill || {};
+  setPill('kill-status', kill.active ? `ACTIVE ${kill.reason || ''}` : 'Kill inactive', kill.active ? 'bad' : 'ok');
 }
 
-function renderPositions() {
-  $('positions-body').innerHTML = rows(state.data.positions, 5, (p) => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.asset)}</td><td>${formatNumber(p.quantity)}</td><td>${formatMoney(p.notional)}</td><td>${formatMoney(p.pnl ?? p.unrealized_pnl)}</td></tr>`);
-}
-function renderOrders() {
-  $('open-orders-count').textContent = Array.isArray(state.data.orders) ? String(state.data.orders.length) : '0';
-  const pageItems = pageSlice(state.data.orders, state.pagination.orders);
-  $('orders-body').innerHTML = rows(pageItems, 6, (o) => `<tr><td>${esc(o.client_order_id || o.id)}</td><td>${esc(o.symbol)}</td><td>${esc(o.side)}</td><td>${esc(o.status)}</td><td>${formatNumber(o.price)}</td><td>${formatNumber(o.quantity)}</td></tr>`);
-  $('orders-page').textContent = `${state.pagination.orders.page + 1}/${pageCount(state.data.orders, state.pagination.orders)}`;
-}
-function renderTrades() {
-  const pageItems = pageSlice(state.data.trades, state.pagination.trades);
-  $('trades-body').innerHTML = rows(pageItems, 6, (t) => `<tr><td>${esc(t.trade_id || t.id)}</td><td>${esc(t.symbol)}</td><td>${esc(t.side)}</td><td>${formatNumber(t.price)}</td><td>${formatNumber(t.quantity)}</td><td>${formatNumber(t.fee)}</td></tr>`);
-  $('trades-page').textContent = `${state.pagination.trades.page + 1}/${pageCount(state.data.trades, state.pagination.trades)}`;
-}
-function renderRisk() {
-  const risk = state.data.riskEvents || [];
-  $('risk-count').textContent = String(risk.length);
-  $('risk-body').innerHTML = rows(risk, 4, (r) => `<tr><td>${esc(r.severity)}</td><td>${esc(r.event_type || r.type)}</td><td>${esc(r.message)}</td><td>${esc(r.occurred_at || r.time)}</td></tr>`);
-  setPill('risk-summary', risk.length ? `${risk.length} risk events` : 'Risk normal', risk.some((r) => String(r.severity).includes('critical')) ? 'bad' : risk.length ? 'warn' : 'ok');
-}
-function renderReconciliation() {
-  setPill('reconciliation-status', state.data.reconciliationStatus || 'No reconciliation state', String(state.data.reconciliationStatus || '').includes('ok') ? 'ok' : 'neutral');
-  $('reconciliation-body').innerHTML = rows(state.data.reconciliation, 4, (r) => `<tr><td>${esc(r.category)}</td><td>${esc(r.key)}</td><td>${esc(r.severity)}</td><td>${esc(r.message)}</td></tr>`);
+function renderVolume() {
+  const volume = state.data.volume;
+  const dailyValue = volume?.daily?.executed_notional ?? state.data.trades.reduce((total, trade) => total + Number(trade.price || 0) * Number(trade.quantity || 0), 0);
+  $('daily-volume').textContent = money(dailyValue);
+  $('daily-volume-subtitle').textContent = volume ? `${Math.round((volume.daily.progress_ratio || 0) * 100)}% daily target` : 'target progress';
+  $('volume-progress').innerHTML = volume ? [
+    stackItem('Hourly Progress', `${money(volume.hourly.executed_notional)} / ${money(volume.hourly.target_notional)}`),
+    stackItem('Daily Progress', `${money(volume.daily.executed_notional)} / ${money(volume.daily.target_notional)}`),
+    stackItem('Weekly Progress', `${money(volume.weekly.executed_notional)} / ${money(volume.weekly.target_notional)}`),
+    stackItem('Participation', `${num((volume.participation_rate || 0) * 100)}%`),
+    stackItem('Pressure', `${volume.pressure.reason} size x${num(volume.pressure.size_multiplier)} spread x${num(volume.pressure.spread_multiplier)}`)
+  ].join('') : stackItem('Volume Engine', 'No backend volume state returned');
 }
 
-function renderKillSwitch(payload) {
-  const active = Boolean(payload?.active);
-  setPill('kill-status', active ? `ACTIVE: ${payload.reason || 'unknown'}` : 'Inactive', active ? 'bad' : 'ok');
-  $('kill-switch').disabled = true;
-  $('kill-output').textContent = JSON.stringify(payload || { active: false }, null, 2);
-}
-
-function renderCanaryLimits(payload) {
-  const current = $('kill-output').textContent || '';
-  $('kill-output').textContent = `${current}\nCanary limits: ${JSON.stringify(payload || {}, null, 2)}`.trim();
+function renderCoinstore() {
+  const accounts = state.data.coinstore.accounts || [];
+  const health = state.data.coinstore.health || {};
+  $('coinstore-state').innerHTML = [
+    stackItem('REST Health', health.rest?.status || 'not checked'),
+    stackItem('REST Latency', `${num(health.rest?.latency_ms)} ms`),
+    stackItem('WebSocket Health', health.websocket?.status || 'not checked'),
+    stackItem('Rate Limit', health.rate_limit ? `${health.rate_limit.requests}/${health.rate_limit.window_seconds}s` : 'not returned'),
+    stackItem('Stored Accounts', String(accounts.length)),
+    ...accounts.map((account) => stackItem(`${account.account_alias} ${account.environment}`, `${account.is_enabled ? 'enabled' : 'disabled'} key=${account.has_api_key} secret=${account.has_api_secret}`))
+  ].join('');
 }
 
 function rows(items, cols, renderer) { return Array.isArray(items) && items.length ? items.map(renderer).join('') : emptyRow(cols); }
-function pageSlice(items, page) { const list = Array.isArray(items) ? items : []; const start = page.page * page.size; return list.slice(start, start + page.size); }
+function pageSlice(items, page) { const list = Array.isArray(items) ? items : []; return list.slice(page.page * page.size, page.page * page.size + page.size); }
 function pageCount(items, page) { return Math.max(1, Math.ceil((Array.isArray(items) ? items.length : 0) / page.size)); }
 function changePage(kind, direction) { const page = state.pagination[kind]; page.page = Math.max(0, Math.min(page.page + direction, pageCount(state.data[kind], page) - 1)); renderAll(); }
-function stackItem(name, status) { const cls = String(status).includes('healthy') || String(status).includes('ok') || String(status).includes('configured') ? 'ok' : String(status).includes('unhealthy') || String(status).includes('failed') ? 'bad' : 'neutral'; return `<div class="stack-item"><b>${esc(name)}</b><span class="pill ${cls}">${esc(status)}</span></div>`; }
-function formatMoney(value) { if (value === undefined || value === null || value === '') return '$0.00'; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : esc(value); }
-function formatNumber(value) { if (value === undefined || value === null || value === '') return ''; const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : esc(value); }
-function formatDuration(seconds) { const total = Math.max(0, Math.floor(Number(seconds) || 0)); const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); const secs = total % 60; return hours ? `${hours}h ${minutes}m` : minutes ? `${minutes}m ${secs}s` : `${secs}s`; }
-function esc(value) { return String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function sampleHistory() {
-  if (state.data.pnl) pushSample(state.history.pnl, Number(state.data.pnl.total || 0));
-  if (state.data.inventory) pushSample(state.history.inventory, Number(state.data.inventory.exposure_notional || state.data.inventory.total_notional || 0));
-}
-function sampleThroughput(payload) {
-  const engines = payload.engines || payload;
-  const dataEngine = engines['market-data-engine'] || {};
-  const counters = dataEngine.runtime?.metrics?.counters || {};
-  pushSample(state.history.marketMessages, { value: Number(counters['market_data.messages'] || 0), time: Date.now() });
-}
-function pushSample(series, value) { if (typeof value === 'object' || Number.isFinite(value)) { series.push(value); while (series.length > 40) series.shift(); } }
-function renderCharts() { renderAreaChart('pnl-chart', state.history.pnl, ''); renderAreaChart('inventory-chart', state.history.inventory, 'inventory'); renderSparkline('unrealized-chart', state.history.pnl); renderSparkline('market-latency-chart', latencySeries('market')); renderSparkline('redis-latency-chart', latencySeries('redis')); renderSparkline('db-latency-chart', latencySeries('db')); renderSparkline('throughput-chart', throughputSeries()); }
-function renderAreaChart(id, values, cls) {
+function stackItem(name, status) { const s = String(status); const cls = s.includes('healthy') || s.includes('ok') || s.includes('enabled') || s.includes('inactive') ? 'ok' : s.includes('unhealthy') || s.includes('failed') || s.includes('ACTIVE') ? 'bad' : 'neutral'; return `<div class="stack-item"><b>${esc(name)}</b><span class="pill ${cls}">${esc(status)}</span></div>`; }
+function money(value) { const n = Number(value || 0); return Number.isFinite(n) ? n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : esc(value); }
+function num(value) { const n = Number(value || 0); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : esc(value); }
+function title(value) { return String(value).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()); }
+function pushSample(series, value) { if (Number.isFinite(value)) { series.push(value); while (series.length > 40) series.shift(); } }
+function renderAreaChart(id, values) {
   const el = $(id);
-  if (!values.length) { el.innerHTML = '<div class="empty">No chart samples yet</div>'; return; }
-  const points = chartPoints(values, 100, 44);
-  const line = points.map((p) => `${p.x},${p.y}`).join(' ');
-  const area = `0,48 ${line} 100,48`;
-  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 100 50" preserveAspectRatio="none"><polygon class="chart-area ${cls}" points="${area}"></polygon><polyline class="chart-area ${cls}" fill="none" points="${line}"></polyline></svg>`;
-}
-function renderSparkline(id, values) {
-  const el = $(id);
+  if (!el) return;
   if (!values.length) { el.innerHTML = ''; return; }
-  const line = chartPoints(values, 100, 34).map((p) => `${p.x},${p.y}`).join(' ');
-  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 100 36" preserveAspectRatio="none"><polyline class="spark-path" points="${line}"></polyline></svg>`;
-}
-function chartPoints(values, width, height) {
-  const nums = values.map((v) => Number(v)).filter(Number.isFinite);
-  const min = Math.min(...nums, 0);
-  const max = Math.max(...nums, 1);
-  const spread = max - min || 1;
-  return nums.map((value, index) => ({ x: nums.length === 1 ? width : index / (nums.length - 1) * width, y: height - ((value - min) / spread * (height - 4)) + 2 }));
-}
-function renderLatencyAndThroughput() {
-  const redisLatency = Number(state.data.infrastructure.redis_latency_ms || 0);
-  const dbLatency = Number(state.data.infrastructure.database_latency_ms || 0);
-  $('redis-latency').textContent = `${formatNumber(redisLatency)} ms`;
-  $('db-latency').textContent = `${formatNumber(dbLatency)} ms`;
-  const engines = state.data.engines || {};
-  const dataEngine = engines['market-data-engine'] || {};
-  const runtime = dataEngine.runtime || {};
-  const lastTimes = Object.values(runtime.last_message_timestamp || {});
-  const latest = lastTimes.length ? Math.max(...lastTimes.map((value) => Date.parse(value)).filter(Number.isFinite)) : 0;
-  const marketLatency = latest ? Date.now() - latest : 0;
-  $('market-latency').textContent = `${formatNumber(marketLatency)} ms`;
-  const series = state.history.marketMessages;
-  const previous = series[series.length - 2];
-  const current = series[series.length - 1];
-  const throughput = previous && current ? Math.max(0, current.value - previous.value) / Math.max(1, (current.time - previous.time) / 1000) : 0;
-  $('message-throughput').textContent = `${formatNumber(throughput)}/s`;
-  const uptimes = Object.values(engines).map((engine) => Number(engine?.uptime_seconds || 0)).filter(Number.isFinite);
-  $('engine-uptime').textContent = formatDuration(Math.max(0, ...uptimes));
-  pushSample(state.history.redisLatency = state.history.redisLatency || [], redisLatency);
-  pushSample(state.history.dbLatency = state.history.dbLatency || [], dbLatency);
-  pushSample(state.history.marketLatency = state.history.marketLatency || [], marketLatency);
-}
-
-function latencySeries(kind) { return state.history[`${kind}Latency`] || []; }
-function throughputSeries() { const series = state.history.marketMessages; return series.map((item, index) => index ? Math.max(0, item.value - series[index - 1].value) / Math.max(1, (item.time - series[index - 1].time) / 1000) : 0); }
-function renderDailyVolume() { const volume = (state.data.trades || []).reduce((total, trade) => total + Number(trade.price || 0) * Number(trade.quantity || 0), 0); $('daily-volume').textContent = formatMoney(volume); }
-
-function reconciliationRows(payload) {
-  const mismatches = payload.mismatches || payload.items || [];
-  if (mismatches.length) return mismatches;
-  return [{
-    category: 'summary',
-    key: `runs=${payload.runs ?? 0}`,
-    severity: payload.status || 'unknown',
-    message: `mismatches=${payload.mismatch_count ?? 0}, alerts=${payload.alert_count ?? 0}`
-  }];
+  const min = Math.min(...values, 0), max = Math.max(...values, 1), spread = max - min || 1;
+  const points = values.map((v, i) => `${values.length === 1 ? 100 : i / (values.length - 1) * 100},${46 - ((v - min) / spread * 40)}`).join(' ');
+  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 100 50" preserveAspectRatio="none"><polyline class="chart-area" fill="none" points="${points}"></polyline></svg>`;
 }
 
 function init() {
-  syncStoredAuthState();
+  initNav();
+  initConfigForms();
+  initCoinstore();
+  initEmergency();
   $('api-base').value = state.apiBase;
   $('ws-url').value = state.wsUrl;
   $('bearer-token').value = state.token;
   $('save-token').addEventListener('click', () => {
-    state.apiBase = $('api-base').value.trim() || '/api';
+    state.apiBase = normalizeApiBase($('api-base').value);
     state.token = normalizeToken($('bearer-token').value);
-    $('bearer-token').value = state.token;
-    console.info('jwt_auth_diagnostics', tokenDiagnostics('save_token', state.token));
     localStorage.setItem('ops.apiBase', state.apiBase);
     localStorage.setItem('ops.token', state.token);
     refreshRest();
@@ -502,8 +477,10 @@ function init() {
   $('trades-prev').addEventListener('click', () => changePage('trades', -1));
   $('trades-next').addEventListener('click', () => changePage('trades', 1));
   $('clear-log').addEventListener('click', () => { state.lastEvents = []; $('event-log').textContent = ''; });
-  $('kill-switch').addEventListener('click', () => { logEvent('kill_switch_read_only', { message: 'Use authenticated admin API to enable or disable kill switch.' }); });
-  renderAll(); refreshRest(); connectWebSocket(); setInterval(refreshRest, 10000);
+  renderAll();
+  refreshRest();
+  connectWebSocket();
+  setInterval(refreshRest, 10000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

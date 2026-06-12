@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from mmbot.core.config import Settings, default_runtime_config
+from mmbot.db.repositories import ConfigRepository
 from mmbot.db.session import Database
 from mmbot.engines.market_data.engine import MarketDataEngine
 from mmbot.engines.market_data.runtime import MarketDataRuntime
@@ -100,18 +101,22 @@ class EngineDaemon:
         self._shutdown_event.set()
 
     async def _initialize_dependencies(self) -> None:
-        runtime_config = default_runtime_config()
         self.redis = RedisManager(self.settings)
         cache = CacheManager(self.redis.client)
         bus = EngineCommunicationLayer(PubSubFramework(self.redis.client), cache)
         self.database = Database(self.settings)
         self.session = self.database.session_factory()
+        try:
+            runtime_config = await ConfigRepository(self.session).runtime_config()
+        except Exception:
+            await self.session.rollback()
+            runtime_config = default_runtime_config()
         if self.component_name == 'market-data-engine':
             self.engine = MarketDataEngine(runtime_config.liquidity, bus)
             self.runtime = MarketDataRuntime(self.settings, self.session, bus, self.engine, self.metrics)
         elif self.component_name == 'market-maker-engine':
-            self.engine = QuoteEngine(runtime_config.spread, runtime_config.order_size, runtime_config.inventory)
-            self.runtime = MarketMakerRuntime(self.settings, self.session, bus, self.engine, self.metrics)
+            self.engine = QuoteEngine(runtime_config.spread, runtime_config.order_size, runtime_config.inventory, runtime_config.order_layers)
+            self.runtime = MarketMakerRuntime(self.settings, self.session, bus, self.engine, self.metrics, runtime_config)
         else:
             raise ValueError(f'Unsupported engine component: {self.component_name}')
 

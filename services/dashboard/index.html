@@ -3,22 +3,21 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Market Maker Operations Dashboard</title>
+    <title>Institutional Coinstore Market Making Control Center</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
     <main class="terminal-shell">
       <section class="command-bar" aria-label="Executive status bar">
         <div class="brand-block">
-          <span class="eyebrow">Institutional MM Ops</span>
-          <h1>Market Maker Control</h1>
+          <span class="eyebrow">Institutional Coinstore MM</span>
+          <h1>Market Making Control Center</h1>
         </div>
         <div class="command-chips">
           <span id="api-status" class="status-chip neutral">API checking</span>
           <span id="mode-pill" class="status-chip neutral">Mode unknown</span>
-          <span id="exchange-summary" class="status-chip neutral">Exchanges loading</span>
+          <span id="exchange-summary" class="status-chip neutral">Coinstore checking</span>
           <span id="kill-status" class="status-chip neutral">Kill switch unknown</span>
-          <span id="reconciliation-status" class="status-chip neutral">Reconciliation loading</span>
           <span id="risk-summary" class="status-chip neutral">Risk loading</span>
           <span id="ws-status" class="status-chip neutral pulse">WebSocket idle</span>
         </div>
@@ -28,7 +27,7 @@
         <div class="form-grid compact">
           <label>API Base<input id="api-base" value="/api" autocomplete="off" /></label>
           <label>WebSocket URL<input id="ws-url" autocomplete="off" /></label>
-          <label>Admin Bearer Token<input id="bearer-token" type="password" autocomplete="off" /></label>
+          <label>Operator JWT<input id="bearer-token" type="password" autocomplete="off" /></label>
         </div>
         <div class="button-row">
           <button id="save-token" type="button">Save Token</button>
@@ -38,49 +37,69 @@
         </div>
       </section>
 
-      <section class="kpi-strip" aria-label="Trading KPIs">
-        <article class="kpi-card positive"><span>Net PnL</span><strong id="pnl-value">$0.00</strong><small id="pnl-subtitle">realized / unrealized</small><div id="pnl-chart" class="mini-chart"></div></article>
-        <article class="kpi-card"><span>Unrealized PnL</span><strong id="unrealized-pnl-value">$0.00</strong><small>mark-to-market</small><div id="unrealized-chart" class="sparkline"></div></article>
-        <article class="kpi-card"><span>Inventory Exposure</span><strong id="inventory-exposure">$0.00</strong><small id="inventory-subtitle">0 snapshots</small><div id="inventory-chart" class="mini-chart"></div></article>
-        <article class="kpi-card"><span>Open Orders</span><strong id="open-orders-count">0</strong><small>active paper/canary/live</small></article>
-        <article class="kpi-card"><span>Daily Volume</span><strong id="daily-volume">$0.00</strong><small>from trades monitor</small></article>
-        <article class="kpi-card"><span>Risk Events</span><strong id="risk-count">0</strong><small>critical / warning</small></article>
+      <nav id="main-nav" class="nav-tabs" aria-label="Control center navigation"></nav>
+
+      <section id="page-overview" class="page active">
+        <section class="kpi-strip" aria-label="Trading KPIs">
+          <article class="kpi-card positive"><span>Net PnL</span><strong id="pnl-value">$0.00</strong><small id="pnl-subtitle">realized / unrealized</small><div id="pnl-chart" class="mini-chart"></div></article>
+          <article class="kpi-card"><span>Inventory Exposure</span><strong id="inventory-exposure">$0.00</strong><small id="inventory-subtitle">0 snapshots</small><div id="inventory-chart" class="mini-chart"></div></article>
+          <article class="kpi-card"><span>Open Orders</span><strong id="open-orders-count">0</strong><small>runtime orders</small></article>
+          <article class="kpi-card"><span>Daily Volume</span><strong id="daily-volume">$0.00</strong><small id="daily-volume-subtitle">target progress</small></article>
+          <article class="kpi-card"><span>Risk Events</span><strong id="risk-count">0</strong><small>critical / warning</small></article>
+          <article class="kpi-card"><span>Audit Records</span><strong id="audit-count">0</strong><small>latest operator actions</small></article>
+        </section>
+        <section class="live-ops-grid" aria-label="Live operations">
+          <div class="ops-left">
+            <article class="glass-panel data-panel">
+              <div class="panel-header"><h2>Orders Monitor</h2><div class="pager"><button id="orders-prev" class="ghost" type="button">Prev</button><span id="orders-page">1</span><button id="orders-next" class="ghost" type="button">Next</button></div></div>
+              <div class="table-wrap virtualized"><table><thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Status</th><th>Price</th><th>Qty</th></tr></thead><tbody id="orders-body"></tbody></table></div>
+            </article>
+            <article class="glass-panel data-panel">
+              <div class="panel-header"><h2>Trades Monitor</h2><div class="pager"><button id="trades-prev" class="ghost" type="button">Prev</button><span id="trades-page">1</span><button id="trades-next" class="ghost" type="button">Next</button></div></div>
+              <div class="table-wrap virtualized"><table><thead><tr><th>Trade</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Fee</th></tr></thead><tbody id="trades-body"></tbody></table></div>
+            </article>
+          </div>
+          <div class="ops-right">
+            <article class="glass-panel stack-panel"><div class="panel-header"><h2>Engine Health</h2><span id="engine-updated" class="muted">Polling REST</span></div><div id="engine-health" class="metric-stack"></div></article>
+            <article class="glass-panel stack-panel"><div class="panel-header"><h2>Infrastructure</h2></div><div id="infra-health" class="metric-stack"></div></article>
+            <article class="glass-panel stack-panel"><div class="panel-header"><h2>Runtime Events</h2></div><pre id="event-log" class="event-log"></pre><button id="clear-log" type="button" class="ghost">Clear</button></article>
+          </div>
+        </section>
       </section>
 
-      <section class="telemetry-strip" aria-label="Latency and throughput">
-        <article class="telemetry-card"><span>Market Latency</span><strong id="market-latency">0 ms</strong><div id="market-latency-chart" class="sparkline"></div></article>
-        <article class="telemetry-card"><span>Redis Latency</span><strong id="redis-latency">0 ms</strong><div id="redis-latency-chart" class="sparkline"></div></article>
-        <article class="telemetry-card"><span>DB Latency</span><strong id="db-latency">0 ms</strong><div id="db-latency-chart" class="sparkline"></div></article>
-        <article class="telemetry-card"><span>Throughput</span><strong id="message-throughput">0/s</strong><div id="throughput-chart" class="sparkline"></div></article>
-        <article class="telemetry-card"><span>Engine Uptime</span><strong id="engine-uptime">0s</strong><small>max active engine</small></article>
+      <section id="page-strategy" class="page"><div id="strategy-panel" class="settings-grid"></div></section>
+      <section id="page-spread" class="page"><div id="spread-panel" class="settings-grid"></div></section>
+      <section id="page-layers" class="page"><div id="order_layers-panel" class="settings-grid"></div></section>
+      <section id="page-order-size" class="page"><div id="order_size-panel" class="settings-grid"></div></section>
+      <section id="page-volume" class="page"><div id="volume-panel" class="settings-grid"></div><article class="glass-panel data-panel"><div class="panel-header"><h2>Volume Progress</h2></div><div id="volume-progress" class="metric-stack"></div></article></section>
+      <section id="page-liquidity" class="page"><div id="liquidity-panel" class="settings-grid"></div></section>
+      <section id="page-inventory" class="page"><div id="inventory-panel" class="settings-grid"></div><article class="glass-panel data-panel"><div class="panel-header"><h2>Inventory Snapshots</h2></div><div id="inventory-detail" class="metric-stack"></div></article></section>
+      <section id="page-risk" class="page"><div id="risk-panel" class="settings-grid"></div><article class="glass-panel data-panel"><div class="panel-header"><h2>Risk Events</h2></div><div class="table-wrap console-table"><table><thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>Time</th></tr></thead><tbody id="risk-body"></tbody></table></div></article></section>
+      <section id="page-coinstore" class="page">
+        <div id="exchange-panel" class="settings-grid"></div>
+        <article class="glass-panel data-panel">
+          <div class="panel-header"><h2>Coinstore API Key Management</h2><span class="muted">Secrets are write-only</span></div>
+          <form id="coinstore-form" class="form-grid">
+            <label>Account Alias<input name="account_alias" value="primary" autocomplete="off" /></label>
+            <label>Environment<select name="environment"><option>production</option><option>staging</option><option>sandbox</option></select></label>
+            <label>API Key<input name="api_key" type="password" autocomplete="off" /></label>
+            <label>API Secret<input name="api_secret" type="password" autocomplete="off" /></label>
+            <label>Passphrase<input name="passphrase" type="password" autocomplete="off" /></label>
+            <label>Permissions<input name="permissions" value="read,trade" autocomplete="off" /></label>
+            <label>Enabled<select name="is_enabled"><option value="false">false</option><option value="true">true</option></select></label>
+            <div class="button-row"><button type="submit">Store Encrypted Credentials</button><button id="coinstore-health" type="button" class="secondary">Check Health</button><button id="coinstore-sync" type="button" class="secondary">Sync Balances</button></div>
+          </form>
+          <div id="coinstore-state" class="metric-stack"></div>
+        </article>
       </section>
-
-      <section class="live-ops-grid" aria-label="Live operations">
-        <div class="ops-left">
-          <article class="glass-panel data-panel">
-            <div class="panel-header"><h2>Orders Monitor</h2><div class="pager"><button id="orders-prev" class="ghost" type="button">Prev</button><span id="orders-page">1</span><button id="orders-next" class="ghost" type="button">Next</button></div></div>
-            <div class="table-wrap virtualized"><table><thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Status</th><th>Price</th><th>Qty</th></tr></thead><tbody id="orders-body"></tbody></table></div>
-          </article>
-          <article class="glass-panel data-panel">
-            <div class="panel-header"><h2>Trades Monitor</h2><div class="pager"><button id="trades-prev" class="ghost" type="button">Prev</button><span id="trades-page">1</span><button id="trades-next" class="ghost" type="button">Next</button></div></div>
-            <div class="table-wrap virtualized"><table><thead><tr><th>Trade</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Fee</th></tr></thead><tbody id="trades-body"></tbody></table></div>
-          </article>
-        </div>
-        <div class="ops-right">
-          <article class="glass-panel data-panel"><div class="panel-header"><h2>Positions</h2></div><div class="table-wrap compact-table"><table><thead><tr><th>Symbol</th><th>Asset</th><th>Qty</th><th>Notional</th><th>PnL</th></tr></thead><tbody id="positions-body"></tbody></table></div></article>
-          <article class="glass-panel stack-panel"><div class="panel-header"><h2>Inventory Exposure</h2></div><div id="inventory-detail" class="metric-stack"></div></article>
-          <article class="glass-panel stack-panel"><div class="panel-header"><h2>Infrastructure</h2><span id="infra-updated" class="muted">Polling REST</span></div><div id="infra-health" class="metric-stack"></div></article>
-        </div>
-      </section>
-
-      <section class="risk-console" aria-label="Risk and reconciliation">
-        <details class="glass-panel" open><summary>Risk Events</summary><div class="table-wrap console-table"><table><thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>Time</th></tr></thead><tbody id="risk-body"></tbody></table></div></details>
-        <details class="glass-panel" open><summary>Reconciliation</summary><div class="table-wrap console-table"><table><thead><tr><th>Category</th><th>Key</th><th>Severity</th><th>Message</th></tr></thead><tbody id="reconciliation-body"></tbody></table></div></details>
-        <details class="glass-panel"><summary>Kill Switch Activity</summary><pre id="kill-output" class="event-log"></pre><button id="kill-switch" type="button" class="danger" disabled>Read-only Kill Switch</button></details>
-        <details class="glass-panel" open><summary>Runtime Events <span id="engine-updated" class="muted">No stream update</span></summary><div id="engine-health" class="metric-stack"></div><div id="exchange-connectivity" class="metric-stack"></div><pre id="event-log" class="event-log"></pre><button id="clear-log" type="button" class="ghost">Clear</button></details>
+      <section id="page-emergency" class="page">
+        <article class="glass-panel data-panel">
+          <div class="panel-header"><h2>Emergency Operations Center</h2><span class="pill bad">Confirmed actions only</span></div>
+          <div id="emergency-actions" class="emergency-grid"></div>
+          <pre id="kill-output" class="event-log"></pre>
+        </article>
       </section>
     </main>
-    <template id="empty-row-template"><tr><td colspan="8" class="empty">No records returned by backend</td></tr></template>
     <script src="/app.js" defer></script>
   </body>
 </html>

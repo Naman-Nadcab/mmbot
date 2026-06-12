@@ -95,6 +95,8 @@ class RiskEngine:
         violations: list[str] = []
         if intent.notional > self.settings.max_order_notional:
             violations.append("max_order_notional")
+        if intent.quantity > self.settings.max_position_quantity:
+            violations.append("max_position_quantity")
         if abs(position_notional) + intent.notional > self.settings.max_position_notional:
             violations.append("max_position_notional")
         if abs(total_exposure) + intent.notional > self.settings.max_total_exposure:
@@ -103,9 +105,10 @@ class RiskEngine:
             violations.append("max_open_orders")
         if daily_pnl <= -abs(self.settings.max_daily_loss):
             violations.append("max_daily_loss")
-        for breaker in self.breakers.values():
-            if breaker.is_open():
-                violations.append(f"circuit_breaker:{breaker.name}")
+        if self.settings.circuit_breaker_enabled:
+            for breaker in self.breakers.values():
+                if breaker.is_open():
+                    violations.append(f"circuit_breaker:{breaker.name}")
         score = self.risk_score(intent, total_exposure, daily_pnl, violations)
         return RiskEvaluation(not violations, score, violations)
 

@@ -5,7 +5,7 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated
 
@@ -14,14 +14,18 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mmbot.api.dependencies import get_database, get_redis, get_session
-from mmbot.api.schemas import DOMAIN_MODELS, ConfigResponse, ConfigUpdateRequest, HealthResponse
+from mmbot.api.schemas import DOMAIN_MODELS, ConfigResponse, ConfigUpdateRequest, ConfirmedActionRequest, ExchangeAccountCreateRequest, ExchangeAccountStatusRequest, HealthResponse, StrategyCommandRequest
 from mmbot.core.config import get_settings
-from mmbot.core.security import decode_token, require_admin, require_operations_access
+from mmbot.core.security import decode_token, require_admin, require_config_write, require_incident_response, require_operations_access, require_risk_write, require_trading_control
 from mmbot.db import models
 from mmbot.db.repositories import AuditRepository, ConfigRepository
+from mmbot.engines.volume.engine import VolumeEngine
 from mmbot.db.session import Database
-from mmbot.exchanges.adapters import supported_exchanges
+from mmbot.exchanges.adapters import create_adapter, supported_exchanges
+from mmbot.exchanges.auth import Credentials, HmacSigner
 from mmbot.redis.manager import RedisManager
+from mmbot.runtime.config_service import MARKET_DATA_COMMAND_CHANNEL, MARKET_MAKER_COMMAND_CHANNEL, RuntimeConfigService, publish_runtime_command
+from mmbot.security.secrets import SecretCipher
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -74,21 +78,153 @@ async def get_domain_config(domain: str, session: Annotated[AsyncSession, Depend
 
 
 @router.put("/admin/config/{domain}", response_model=ConfigResponse)
-async def update_domain_config(domain: str, request: ConfigUpdateRequest, session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_admin)]) -> ConfigResponse:
+async def update_domain_config(domain: str, request: ConfigUpdateRequest, session: Annotated[AsyncSession, Depends(get_session)], redis: Annotated[RedisManager, Depends(get_redis)], actor: Annotated[dict, Depends(require_config_write)]) -> ConfigResponse:
     model = DOMAIN_MODELS.get(domain)
     if model is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown configuration domain")
-    validated = model.model_validate(request.config).model_dump()
-    actor_user_id = uuid.UUID(actor["sub"]) if actor.get("sub") else None
-    repo = ConfigRepository(session)
-    row = await repo.upsert_domain(domain, validated, actor_user_id)
-    await AuditRepository(session).record("api", "CONFIG_UPDATE", "bot_configs", row.id, {"domain": domain, "version": row.version})
-    return ConfigResponse(domain=domain, version=row.version, config=row.config)
+    _require_config_domain_actor(domain, actor)
+    version, config = await RuntimeConfigService(session, redis).update_domain(domain, model, request.config, actor)
+    return ConfigResponse(domain=domain, version=version, config=config)
 
 
 @router.get("/admin/exchanges/capabilities")
 async def exchange_capabilities(_: Annotated[dict, Depends(require_admin)]) -> dict:
     return supported_exchanges()
+
+
+@router.get("/operations/runtime-config")
+async def operations_runtime_config(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
+    return (await ConfigRepository(session).runtime_config()).model_dump()
+
+
+@router.get("/operations/audit-logs")
+async def operations_audit_logs(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], limit: int = 100) -> dict:
+    result = await session.execute(select(models.AuditLog).order_by(desc(models.AuditLog.occurred_at)).limit(limit))
+    return {"items": [_audit_payload(row) for row in result.scalars().all()]}
+
+
+@router.post("/admin/strategy/command")
+async def admin_strategy_command(request: StrategyCommandRequest, redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_trading_control)]) -> dict:
+    _require_confirmation(request.confirmation, request.command)
+    state = {
+        "state": "running" if request.command in {"start", "resume"} else "paused" if request.command == "pause" else "stopped",
+        "reason": request.reason,
+        "actor": actor.get("sub"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await redis.client.set("runtime:strategy:state", json.dumps(state, separators=(",", ":")))
+    event = await publish_runtime_command(session, redis, actor=actor, command_type="STRATEGY_COMMAND", payload={"action": request.command, "reason": request.reason, "state": state}, action=f"STRATEGY_{request.command.upper()}")
+    return {"state": state, "event": event}
+
+
+@router.get("/operations/volume")
+async def operations_volume(session: Annotated[AsyncSession, Depends(get_session)], redis: Annotated[RedisManager, Depends(get_redis)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
+    config = await ConfigRepository(session).runtime_config()
+    progress = await _volume_progress_payload(session, redis, config.volume.model_dump())
+    return progress
+
+
+@router.get("/admin/coinstore/accounts")
+async def coinstore_accounts(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)]) -> dict:
+    result = await session.execute(select(models.ExchangeAccount).where(models.ExchangeAccount.exchange_name == "coinstore").order_by(desc(models.ExchangeAccount.updated_at)))
+    return {"items": [_exchange_account_payload(row) for row in result.scalars().all()]}
+
+
+@router.post("/admin/coinstore/accounts")
+async def coinstore_account_upsert(request: ExchangeAccountCreateRequest, session: Annotated[AsyncSession, Depends(get_session)], redis: Annotated[RedisManager, Depends(get_redis)], actor: Annotated[dict, Depends(require_config_write)], settings=Depends(get_settings)) -> dict:
+    cipher = SecretCipher(settings)
+    result = await session.execute(select(models.ExchangeAccount).where(models.ExchangeAccount.exchange_name == "coinstore", models.ExchangeAccount.account_alias == request.account_alias, models.ExchangeAccount.environment == request.environment))
+    row = result.scalar_one_or_none()
+    before = _exchange_account_payload(row) if row is not None else None
+    if row is None:
+        row = models.ExchangeAccount(exchange_name="coinstore", account_alias=request.account_alias, environment=request.environment, api_key_ciphertext=cipher.encrypt(request.api_key) or b"", api_secret_ciphertext=cipher.encrypt(request.api_secret) or b"", passphrase_ciphertext=cipher.encrypt(request.passphrase), encryption_key_id=cipher.key_id, permissions=request.permissions, is_enabled=request.is_enabled)
+        session.add(row)
+    else:
+        row.api_key_ciphertext = cipher.encrypt(request.api_key) or b""
+        row.api_secret_ciphertext = cipher.encrypt(request.api_secret) or b""
+        row.passphrase_ciphertext = cipher.encrypt(request.passphrase)
+        row.encryption_key_id = cipher.key_id
+        row.permissions = request.permissions
+        row.is_enabled = request.is_enabled
+    await session.flush()
+    payload = _exchange_account_payload(row)
+    await AuditRepository(session).record("api", "COINSTORE_ACCOUNT_UPSERT", "exchange_accounts", row.id, {"actor": actor.get("sub"), "account_alias": row.account_alias}, before_state=before, after_state=payload)
+    await publish_runtime_command(session, redis, actor=actor, command_type="COINSTORE_ACCOUNT_UPDATED", payload={"account_id": str(row.id), "account_alias": row.account_alias}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="exchange_accounts")
+    return payload
+
+
+@router.put("/admin/coinstore/accounts/{account_id}/status")
+async def coinstore_account_status(account_id: uuid.UUID, request: ExchangeAccountStatusRequest, session: Annotated[AsyncSession, Depends(get_session)], redis: Annotated[RedisManager, Depends(get_redis)], actor: Annotated[dict, Depends(require_config_write)]) -> dict:
+    _require_confirmation(request.confirmation, "enable" if request.is_enabled else "disable")
+    row = await session.get(models.ExchangeAccount, account_id)
+    if row is None or row.exchange_name != "coinstore":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coinstore account not found")
+    before = _exchange_account_payload(row)
+    row.is_enabled = request.is_enabled
+    await session.flush()
+    payload = _exchange_account_payload(row)
+    await AuditRepository(session).record("api", "COINSTORE_ACCOUNT_STATUS", "exchange_accounts", row.id, {"actor": actor.get("sub"), "reason": request.reason}, before_state=before, after_state=payload)
+    await publish_runtime_command(session, redis, actor=actor, command_type="COINSTORE_ACCOUNT_STATUS", payload={"account_id": str(row.id), "is_enabled": row.is_enabled, "reason": request.reason}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="exchange_accounts")
+    return payload
+
+
+@router.get("/admin/coinstore/health")
+async def coinstore_health(redis: Annotated[RedisManager, Depends(get_redis)], actor: Annotated[dict, Depends(require_operations_access)], settings=Depends(get_settings)) -> dict:
+    adapter = create_adapter("coinstore", settings, "coinstore")
+    rest_status = "unknown"
+    rest_error = None
+    started = time.perf_counter()
+    try:
+        await adapter.rest.health()
+        rest_status = "healthy"
+    except Exception as exc:
+        rest_status = "unhealthy"
+        rest_error = f"{exc.__class__.__name__}: {exc}"
+    finally:
+        await adapter.close()
+    latency_ms = round((time.perf_counter() - started) * 1000, 3)
+    data_health = _loads_json(await redis.client.get("engine:health:market-data-engine")) or {}
+    runtime = data_health.get("runtime") or {}
+    last_messages = runtime.get("last_message_timestamp") or {}
+    websocket_keys = [key for key in last_messages if str(key).startswith("coinstore:")]
+    definition = supported_exchanges()["coinstore"]
+    return {
+        "rest": {"status": rest_status, "latency_ms": latency_ms, "error": rest_error},
+        "websocket": {"status": "healthy" if websocket_keys else runtime.get("websocket_state", "no_messages"), "last_message_keys": websocket_keys},
+        "rate_limit": definition["rate_limit"],
+        "actor": actor.get("sub"),
+    }
+
+
+@router.post("/admin/coinstore/balance-sync")
+async def coinstore_balance_sync(request: ConfirmedActionRequest, session: Annotated[AsyncSession, Depends(get_session)], redis: Annotated[RedisManager, Depends(get_redis)], actor: Annotated[dict, Depends(require_config_write)], settings=Depends(get_settings)) -> dict:
+    _require_confirmation(request.confirmation, "sync")
+    result = await session.execute(select(models.ExchangeAccount).where(models.ExchangeAccount.exchange_name == "coinstore", models.ExchangeAccount.is_enabled.is_(True)).order_by(desc(models.ExchangeAccount.updated_at)).limit(1))
+    account = result.scalar_one_or_none()
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="no enabled coinstore account")
+    cipher = SecretCipher(settings)
+    api_key = cipher.decrypt(account.api_key_ciphertext)
+    api_secret = cipher.decrypt(account.api_secret_ciphertext)
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="coinstore account is missing credentials")
+    adapter = create_adapter("coinstore", settings, "coinstore")
+    try:
+        adapter.rest.signer = HmacSigner(Credentials(api_key, api_secret, cipher.decrypt(account.passphrase_ciphertext)))
+        raw = await adapter.rest_request("GET", "/api/spot/accountList", signed=True)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"coinstore balance sync failed: {exc}") from exc
+    finally:
+        await adapter.close()
+    balances = _parse_balance_rows(raw)
+    captured_at = datetime.now(timezone.utc)
+    rows_written = 0
+    for item in balances:
+        session.add(models.InventorySnapshot(exchange_account_id=account.id, asset=item["asset"], total_balance=Decimal(str(item["total"])), available_balance=Decimal(str(item["available"])), reserved_balance=Decimal(str(item["reserved"])), valuation_asset="USDT", valuation_price=None, valuation_amount=None, captured_at=captured_at, metadata_json={"source": "coinstore_balance_sync"}))
+        rows_written += 1
+    await AuditRepository(session).record("api", "COINSTORE_BALANCE_SYNC", "inventory_snapshots", account.id, {"actor": actor.get("sub"), "rows_written": rows_written, "reason": request.reason})
+    await publish_runtime_command(session, redis, actor=actor, command_type="COINSTORE_BALANCE_SYNC", payload={"account_id": str(account.id), "rows_written": rows_written}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="inventory_snapshots")
+    return {"rows_written": rows_written, "captured_at": captured_at.isoformat()}
 
 
 @router.get("/operations/engines")
@@ -216,6 +352,59 @@ async def admin_kill_switch_disable(redis: Annotated[RedisManager, Depends(get_r
     await redis.client.delete("risk:kill_switch")
     session.add(models.RiskEvent(severity=models.RiskSeverity.high, event_type="KILL_SWITCH_CLEARED", source_component="operations-api", message="operator_clear", metadata_json={"actor": actor.get("sub")}))
     return {"active": False}
+
+
+@router.post("/admin/emergency/cancel-all-orders")
+async def emergency_cancel_all_orders(request: ConfirmedActionRequest, redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_incident_response)]) -> dict:
+    _require_confirmation(request.confirmation, "cancel")
+    event = await publish_runtime_command(session, redis, actor=actor, command_type="CANCEL_ALL_ORDERS", payload={"reason": request.reason, "confirmed": True}, action="EMERGENCY_CANCEL_ALL_ORDERS")
+    session.add(models.RiskEvent(severity=models.RiskSeverity.high, event_type="EMERGENCY_CANCEL_ALL_ORDERS", source_component="operations-api", message=request.reason, metadata_json={"actor": actor.get("sub")}))
+    return {"accepted": True, "event": event}
+
+
+@router.post("/admin/emergency/disable-trading")
+async def emergency_disable_trading(request: ConfirmedActionRequest, redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_incident_response)]) -> dict:
+    _require_confirmation(request.confirmation, "disable")
+    state = {"active": True, "reason": request.reason, "actor": actor.get("sub"), "activated_at": datetime.now(timezone.utc).isoformat()}
+    await redis.client.set("risk:kill_switch", json.dumps(state, separators=(",", ":")))
+    event = await publish_runtime_command(session, redis, actor=actor, command_type="DISABLE_TRADING", payload={"reason": request.reason, "kill_switch": state}, action="EMERGENCY_DISABLE_TRADING")
+    session.add(models.RiskEvent(severity=models.RiskSeverity.critical, event_type="TRADING_DISABLED", source_component="operations-api", message=request.reason, is_kill_switch_triggered=True, metadata_json={"actor": actor.get("sub")}))
+    return {"accepted": True, "kill_switch": state, "event": event}
+
+
+@router.post("/admin/emergency/enable-trading")
+async def emergency_enable_trading(request: ConfirmedActionRequest, redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_risk_write)]) -> dict:
+    _require_confirmation(request.confirmation, "enable")
+    await redis.client.delete("risk:kill_switch")
+    event = await publish_runtime_command(session, redis, actor=actor, command_type="ENABLE_TRADING", payload={"reason": request.reason}, action="EMERGENCY_ENABLE_TRADING")
+    session.add(models.RiskEvent(severity=models.RiskSeverity.high, event_type="TRADING_ENABLED", source_component="operations-api", message=request.reason, metadata_json={"actor": actor.get("sub")}))
+    return {"accepted": True, "event": event}
+
+
+@router.post("/admin/emergency/close-positions")
+async def emergency_close_positions(request: ConfirmedActionRequest, redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_incident_response)]) -> dict:
+    _require_confirmation(request.confirmation, "close")
+    event = await publish_runtime_command(session, redis, actor=actor, command_type="CLOSE_POSITIONS", payload={"reason": request.reason, "reduce_only": True}, action="EMERGENCY_CLOSE_POSITIONS")
+    session.add(models.RiskEvent(severity=models.RiskSeverity.critical, event_type="CLOSE_POSITIONS_REQUESTED", source_component="operations-api", message=request.reason, metadata_json={"actor": actor.get("sub")}))
+    return {"accepted": True, "event": event}
+
+
+@router.post("/admin/emergency/runtime-restart")
+async def emergency_runtime_restart(request: ConfirmedActionRequest, redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_incident_response)]) -> dict:
+    _require_confirmation(request.confirmation, "restart")
+    event = await publish_runtime_command(session, redis, actor=actor, command_type="RUNTIME_RESTART", payload={"reason": request.reason}, action="EMERGENCY_RUNTIME_RESTART")
+    session.add(models.RiskEvent(severity=models.RiskSeverity.high, event_type="RUNTIME_RESTART_REQUESTED", source_component="operations-api", message=request.reason, metadata_json={"actor": actor.get("sub")}))
+    return {"accepted": True, "event": event}
+
+
+@router.post("/admin/emergency/shutdown")
+async def emergency_shutdown(request: ConfirmedActionRequest, redis: Annotated[RedisManager, Depends(get_redis)], session: Annotated[AsyncSession, Depends(get_session)], actor: Annotated[dict, Depends(require_incident_response)]) -> dict:
+    _require_confirmation(request.confirmation, "shutdown")
+    state = {"active": True, "reason": request.reason, "actor": actor.get("sub"), "activated_at": datetime.now(timezone.utc).isoformat(), "shutdown": True}
+    await redis.client.set("risk:kill_switch", json.dumps(state, separators=(",", ":")))
+    event = await publish_runtime_command(session, redis, actor=actor, command_type="EMERGENCY_SHUTDOWN", payload={"reason": request.reason, "kill_switch": state}, action="EMERGENCY_SHUTDOWN")
+    session.add(models.RiskEvent(severity=models.RiskSeverity.critical, event_type="EMERGENCY_SHUTDOWN", source_component="operations-api", message=request.reason, is_kill_switch_triggered=True, is_circuit_breaker_triggered=True, metadata_json={"actor": actor.get("sub")}))
+    return {"accepted": True, "kill_switch": state, "event": event}
 
 
 @router.get("/operations/canary-limits")
@@ -418,6 +607,115 @@ def _risk_payload(row: models.RiskEvent) -> dict:
         "message": row.message,
         "occurred_at": _iso(row.occurred_at),
     }
+
+
+def _audit_payload(row: models.AuditLog) -> dict:
+    return {
+        "id": str(row.id),
+        "actor_user_id": str(row.actor_user_id) if row.actor_user_id else None,
+        "actor_service": row.actor_service,
+        "action": row.action,
+        "resource_type": row.resource_type,
+        "resource_id": str(row.resource_id) if row.resource_id else None,
+        "metadata": row.metadata_json,
+        "before_state": row.before_state,
+        "after_state": row.after_state,
+        "occurred_at": _iso(row.occurred_at),
+    }
+
+
+def _exchange_account_payload(row: models.ExchangeAccount | None) -> dict | None:
+    if row is None:
+        return None
+    return {
+        "id": str(row.id),
+        "exchange_name": row.exchange_name,
+        "account_alias": row.account_alias,
+        "environment": row.environment,
+        "permissions": row.permissions,
+        "is_enabled": row.is_enabled,
+        "has_api_key": bool(row.api_key_ciphertext),
+        "has_api_secret": bool(row.api_secret_ciphertext),
+        "has_passphrase": bool(row.passphrase_ciphertext),
+        "encryption_key_id": row.encryption_key_id,
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
+async def _volume_progress_payload(session: AsyncSession, redis: RedisManager, config_payload: dict) -> dict:
+    now = datetime.now(timezone.utc)
+    engine = VolumeEngine(DOMAIN_MODELS["volume"].model_validate(config_payload))
+    since_hour = now.replace(minute=0, second=0, microsecond=0)
+    since_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since_week = since_day - timedelta(days=now.weekday())
+    rows = (await session.execute(select(models.Trade.traded_at, models.Trade.price, models.Trade.quantity))).all()
+    hourly = daily = weekly = 0.0
+    for traded_at, price, quantity in rows:
+        if traded_at is None:
+            continue
+        ts = traded_at if traded_at.tzinfo else traded_at.replace(tzinfo=timezone.utc)
+        notional = _float(price) * _float(quantity)
+        if ts >= since_hour:
+            hourly += notional
+        if ts >= since_day:
+            daily += notional
+        if ts >= since_week:
+            weekly += notional
+    data_health = _loads_json(await redis.client.get("engine:health:market-data-engine")) or {}
+    runtime = data_health.get("runtime") or {}
+    external_volume = 0.0
+    for key in runtime.get("last_message_timestamp", {}) or {}:
+        latest = _loads_json(await redis.client.get(f"latest:marketdata:ticker:{key}")) or {}
+        external_volume += _float(latest.get("volume_24h")) * _float(latest.get("last_price") or latest.get("bid_price") or latest.get("ask_price") or 0)
+    report = engine.progress(now=now, hourly_notional=hourly, daily_notional=daily, weekly_notional=weekly, external_market_volume_notional=external_volume)
+    return {
+        "settings": config_payload,
+        "hourly": report.hourly.__dict__,
+        "daily": report.daily.__dict__,
+        "weekly": report.weekly.__dict__,
+        "participation_rate": report.participation_rate,
+        "pressure": report.pressure.__dict__,
+        "external_market_volume_notional": external_volume,
+    }
+
+
+def _parse_balance_rows(raw: object) -> list[dict[str, float | str]]:
+    payload = raw
+    if isinstance(raw, dict):
+        payload = raw.get("data") or raw.get("balances") or raw.get("result") or raw
+    if isinstance(payload, dict):
+        payload = payload.get("list") or payload.get("items") or payload.get("accounts") or []
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="coinstore balance response format is unsupported")
+    rows: list[dict[str, float | str]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        asset = str(item.get("asset") or item.get("currency") or item.get("coin") or "").upper()
+        if not asset:
+            continue
+        available = _float(item.get("available") or item.get("free") or item.get("normal") or 0)
+        reserved = _float(item.get("reserved") or item.get("locked") or item.get("freeze") or 0)
+        total = _float(item.get("total") or available + reserved)
+        rows.append({"asset": asset, "available": available, "reserved": reserved, "total": total})
+    return rows
+
+
+def _require_confirmation(value: str, expected: str) -> None:
+    if expected.lower() not in value.lower():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"confirmation must include '{expected}'")
+
+
+def _require_config_domain_actor(domain: str, actor: dict) -> None:
+    roles = set(actor.get("roles", []))
+    permissions = set(actor.get("permissions", []))
+    if "platform_admin" in roles:
+        return
+    if domain == "risk" and "risk_manager" not in roles and "risk:write" not in permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="risk config requires risk_manager or risk:write")
+    if domain in {"strategy", "spread", "order_layers", "order_size", "volume", "liquidity", "inventory"} and not roles.intersection({"trader_operator", "risk_manager"}) and "config:write" not in permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="trading config requires trader_operator/risk_manager/config:write")
 
 
 def _float(value: object) -> float:

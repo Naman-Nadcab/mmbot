@@ -63,16 +63,77 @@ def require_admin(request: Request, credentials: HTTPAuthorizationCredentials | 
     return payload
 
 
-def require_operations_access(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+def _require_access(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+    settings: Settings,
+    *,
+    allowed_roles: set[str],
+    allowed_permissions: set[str],
+    reason: str,
+) -> dict[str, Any]:
     if credentials is None:
         raise _missing_credentials(request, "missing_or_malformed_authorization")
     logger.info("jwt_auth_request", extra=_auth_metadata(request, credentials.credentials, request.headers.get("authorization")))
     payload = decode_token(credentials.credentials, settings, request, request.headers.get("authorization"))
     permissions = set(payload.get("permissions", []))
     roles = set(payload.get("roles", []))
-    allowed_roles = {"platform_admin", "risk_manager", "incident_responder", "read_only_analyst"}
-    allowed_permissions = {"operations:read", "config:read", "risk:read"}
     if not roles.intersection(allowed_roles) and not permissions.intersection(allowed_permissions):
-        logger.warning("jwt_authorization_failed", extra=_auth_metadata(request, credentials.credentials, request.headers.get("authorization")) | {"reason": "insufficient_operations_permissions", "roles": list(roles), "permissions": list(permissions)})
+        logger.warning("jwt_authorization_failed", extra=_auth_metadata(request, credentials.credentials, request.headers.get("authorization")) | {"reason": reason, "roles": list(roles), "permissions": list(permissions)})
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="insufficient permissions")
     return payload
+
+
+def require_operations_access(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    return _require_access(
+        request,
+        credentials,
+        settings,
+        allowed_roles={"platform_admin", "risk_manager", "trader_operator", "incident_responder", "read_only_analyst"},
+        allowed_permissions={"operations:read", "config:read", "risk:read"},
+        reason="insufficient_operations_permissions",
+    )
+
+
+def require_config_write(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    return _require_access(
+        request,
+        credentials,
+        settings,
+        allowed_roles={"platform_admin", "risk_manager", "trader_operator"},
+        allowed_permissions={"config:write"},
+        reason="insufficient_config_write_permissions",
+    )
+
+
+def require_risk_write(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    return _require_access(
+        request,
+        credentials,
+        settings,
+        allowed_roles={"platform_admin", "risk_manager"},
+        allowed_permissions={"risk:write"},
+        reason="insufficient_risk_write_permissions",
+    )
+
+
+def require_trading_control(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    return _require_access(
+        request,
+        credentials,
+        settings,
+        allowed_roles={"platform_admin", "trader_operator"},
+        allowed_permissions={"trading:write", "config:write"},
+        reason="insufficient_trading_control_permissions",
+    )
+
+
+def require_incident_response(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme), settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    return _require_access(
+        request,
+        credentials,
+        settings,
+        allowed_roles={"platform_admin", "incident_responder", "risk_manager"},
+        allowed_permissions={"incident:write", "risk:write"},
+        reason="insufficient_incident_response_permissions",
+    )
