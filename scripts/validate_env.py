@@ -9,7 +9,9 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
+from urllib.error import URLError
+from urllib.request import urlopen
 
 REQUIRED_KEYS = (
     "DATABASE_URL",
@@ -23,6 +25,21 @@ REQUIRED_KEYS = (
     "SERVER_PORT",
     "LOG_LEVEL",
     "APP_ENV",
+)
+
+REQUIRED_JWT_ROLES = {"platform_admin", "risk_manager", "trader_operator", "incident_responder"}
+REQUIRED_JWT_PERMISSIONS = {"operations:read", "config:write", "risk:write", "incident:write"}
+REQUIRED_OPENAPI_PATHS = (
+    "/operations/runtime-config",
+    "/operations/runtime-events",
+    "/admin/strategy/command",
+    "/operations/volume",
+    "/admin/coinstore/accounts",
+    "/admin/coinstore/health",
+    "/admin/coinstore/balance-sync",
+    "/admin/emergency/cancel-all-orders",
+    "/admin/emergency/close-positions",
+    "/admin/emergency/shutdown",
 )
 
 ALLOWED_APP_ENVS = {"development", "staging", "production", "test"}
@@ -130,13 +147,82 @@ def validate(values: Dict[str, str], allow_template_values: bool) -> List[str]:
     return errors
 
 
+def validate_release_files(root: Path) -> List[str]:
+    errors: List[str] = []
+    migrations_dir = root / "database" / "migrations"
+    schema = root / "database" / "schema.sql"
+    openapi = root / "api" / "openapi.yaml"
+    compose = root / "docker-compose.yml"
+    migrations = sorted(path.name for path in migrations_dir.glob("*.sql")) if migrations_dir.exists() else []
+    if "0001_initial_schema.sql" not in migrations:
+        errors.append("Missing database/migrations/0001_initial_schema.sql")
+    if "0002_runtime_events_and_rbac.sql" not in migrations:
+        errors.append("Missing database/migrations/0002_runtime_events_and_rbac.sql")
+    if migrations and migrations != sorted(migrations):
+        errors.append("Database migrations are not lexicographically ordered")
+    schema_text = schema.read_text(encoding="utf-8") if schema.exists() else ""
+    migration_text = (migrations_dir / "0002_runtime_events_and_rbac.sql").read_text(encoding="utf-8") if (migrations_dir / "0002_runtime_events_and_rbac.sql").exists() else ""
+    if "CREATE TABLE runtime_events" not in schema_text:
+        errors.append("runtime_events table is missing from database/schema.sql")
+    if "CREATE TABLE IF NOT EXISTS runtime_events" not in migration_text:
+        errors.append("runtime_events migration is missing from 0002_runtime_events_and_rbac.sql")
+    for permission in ("operations:read", "trading:write", "incident:write", "exchange:write"):
+        if permission not in migration_text:
+            errors.append(f"RBAC migration missing permission {permission}")
+    openapi_text = openapi.read_text(encoding="utf-8") if openapi.exists() else ""
+    for path in REQUIRED_OPENAPI_PATHS:
+        if path not in openapi_text:
+            errors.append(f"OpenAPI contract missing {path}")
+    compose_text = compose.read_text(encoding="utf-8") if compose.exists() else ""
+    if "redis-server" in compose_text and "appendonly" not in compose_text:
+        errors.append("docker-compose Redis service does not enable appendonly persistence")
+    return errors
+
+
+def validate_jwt_claims(claims: dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    roles = set(claims.get("roles") or [])
+    permissions = set(claims.get("permissions") or [])
+    if not roles.intersection(REQUIRED_JWT_ROLES):
+        errors.append(f"JWT roles must include at least one of: {', '.join(sorted(REQUIRED_JWT_ROLES))}")
+    if not permissions.intersection(REQUIRED_JWT_PERMISSIONS):
+        errors.append(f"JWT permissions must include at least one of: {', '.join(sorted(REQUIRED_JWT_PERMISSIONS))}")
+    if "exp" not in claims:
+        errors.append("JWT claims should include exp")
+    return errors
+
+
+def validate_health_endpoints(api_base_url: str) -> List[str]:
+    errors: List[str] = []
+    base = api_base_url.rstrip("/")
+    for path in ("/health", "/ready"):
+        url = f"{base}{path}"
+        try:
+            with urlopen(url, timeout=5) as response:
+                if response.status >= 400:
+                    errors.append(f"{url} returned HTTP {response.status}")
+        except URLError as exc:
+            errors.append(f"{url} failed: {exc}")
+    return errors
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate platform environment variables")
     parser.add_argument("--file", dest="env_file", type=Path, help="Optional .env file to validate")
     parser.add_argument("--allow-template-values", action="store_true", help="Allow template values in committed environment files")
+    parser.add_argument("--release-checks", action="store_true", help="Validate release-candidate repository files")
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd(), help="Repository root for release checks")
+    parser.add_argument("--jwt-claims-file", type=Path, help="JSON file containing decoded JWT claims to validate")
+    parser.add_argument("--api-base-url", help="Validate /health and /ready on this API base URL")
     args = parser.parse_args(argv)
     try:
         errors = validate(merged_environment(args.env_file), args.allow_template_values)
+        if args.release_checks:
+            errors.extend(validate_release_files(args.repo_root))
+        if args.jwt_claims_file:
+            errors.extend(validate_jwt_claims(json.loads(args.jwt_claims_file.read_text(encoding="utf-8"))))
+        if args.api_base_url:
+            errors.extend(validate_health_endpoints(args.api_base_url))
     except Exception as exc:
         print(f"Environment validation failed: {exc}", file=sys.stderr)
         return 2

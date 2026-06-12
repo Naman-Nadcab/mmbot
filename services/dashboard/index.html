@@ -35,6 +35,7 @@
           <button id="connect-ws" type="button" class="secondary">Connect WS</button>
           <button id="disconnect-ws" type="button" class="ghost">Disconnect</button>
         </div>
+        <div id="role-guidance" class="operator-guidance">Required roles: platform_admin, risk_manager, trader_operator, incident_responder. Backend enforces permissions for protected controls.</div>
       </section>
 
       <nav id="main-nav" class="nav-tabs" aria-label="Control center navigation"></nav>
@@ -96,6 +97,7 @@
         <article class="glass-panel data-panel">
           <div class="panel-header"><h2>Emergency Operations Center</h2><span class="pill bad">Confirmed actions only</span></div>
           <div id="emergency-actions" class="emergency-grid"></div>
+          <div id="runtime-ack-state" class="metric-stack"></div>
           <pre id="kill-output" class="event-log"></pre>
         </article>
       </section>

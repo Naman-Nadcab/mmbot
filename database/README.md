@@ -13,8 +13,8 @@ The canonical schema draft is `database/schema.sql`.
 
 ## Core Tables
 
-`users`, `roles`, `permissions`, `user_roles`, `role_permissions`, `bot_configs`, `exchange_accounts`, `trading_pairs`, `orders`, `trades`, `positions`, `inventory_snapshots`, `market_data`, `risk_events`, `alerts`, `audit_logs`, `system_health`, `pnl_history`, `liquidity_metrics`, `volatility_metrics`.
+`users`, `roles`, `permissions`, `user_roles`, `role_permissions`, `bot_configs`, `exchange_accounts`, `trading_pairs`, `orders`, `trades`, `positions`, `inventory_snapshots`, `market_data`, `risk_events`, `alerts`, `audit_logs`, `runtime_events`, `system_health`, `pnl_history`, `liquidity_metrics`, `volatility_metrics`.
 
 ## Migration Strategy
 
-Before runtime implementation, add a migration tool such as Alembic, Flyway, or Liquibase. Production migrations need forward scripts, rollback or compensating actions, lock assessment, and index strategy.
+Use `mmbot-db migrate` to apply SQL migrations in filename order, then `mmbot-db seed` for idempotent seed data. Production migrations need forward scripts, rollback or compensating actions, lock assessment, and index strategy.

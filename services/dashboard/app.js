@@ -38,6 +38,8 @@ const state = {
   config: {},
   versions: {},
   lastEvents: [],
+  pending: {},
+  runtimeEvents: [],
   history: { pnl: [], inventory: [] },
   pagination: { orders: { page: 0, size: 50 }, trades: { page: 0, size: 50 } },
   data: { engines: {}, infrastructure: {}, exchanges: {}, orders: [], trades: [], positions: [], inventory: null, pnl: null, riskEvents: [], auditLogs: [], volume: null, coinstore: {}, kill: null }
@@ -89,6 +91,36 @@ function setPill(id, text, status = 'neutral') {
   if (!el) return;
   el.textContent = text;
   el.className = `status-chip ${status}`;
+}
+
+function setPending(key, active, button) {
+  state.pending[key] = active;
+  if (!button) return;
+  button.disabled = active;
+  button.classList.toggle('pending', active);
+}
+
+function validationError(form, message, fieldNames = []) {
+  form.querySelectorAll('.validation-error').forEach((el) => el.remove());
+  form.querySelectorAll('.invalid').forEach((el) => el.classList.remove('invalid'));
+  for (const name of fieldNames) {
+    if (form.elements[name]) form.elements[name].classList.add('invalid');
+  }
+  if (!message) return;
+  const error = document.createElement('div');
+  error.className = 'validation-error';
+  error.textContent = message;
+  form.prepend(error);
+}
+
+function validateRequired(form, names) {
+  const missing = names.filter((name) => !String(form.elements[name]?.value || '').trim());
+  if (missing.length) {
+    validationError(form, `Required fields missing: ${missing.join(', ')}`, missing);
+    return false;
+  }
+  validationError(form, '');
+  return true;
 }
 
 function initNav() {
@@ -157,17 +189,49 @@ async function saveConfig(event) {
   event.preventDefault();
   const form = event.target;
   const domain = form.dataset.domain;
+  const submit = form.querySelector('button[type="submit"]');
+  validationError(form, '');
   const config = {};
   for (const [name, type] of configDomains[domain]) {
     const raw = form.elements[name].value;
-    config[name] = type === 'number' ? Number(raw) : type === 'boolean' ? raw === 'true' : type === 'csv' ? raw.split(',').map((item) => item.trim()).filter(Boolean) : raw;
+    if (type === 'number') {
+      if (raw === '' || !Number.isFinite(Number(raw))) {
+        validationError(form, `${title(name)} must be a finite number`, [name]);
+        return;
+      }
+      config[name] = Number(raw);
+    } else if (type === 'boolean') {
+      config[name] = raw === 'true';
+    } else if (type === 'csv') {
+      const values = raw.split(',').map((item) => item.trim()).filter(Boolean);
+      if (!values.length) {
+        validationError(form, `${title(name)} requires at least one value`, [name]);
+        return;
+      }
+      config[name] = values;
+    } else {
+      if (!raw.trim()) {
+        validationError(form, `${title(name)} is required`, [name]);
+        return;
+      }
+      config[name] = raw;
+    }
   }
-  const saved = await request(`/admin/config/${domain}`, { method: 'PUT', body: JSON.stringify({ config }) });
-  state.config[domain] = saved.config;
-  state.versions[domain] = saved.version;
-  fillConfigForm(domain);
-  logEvent('runtime_config_updated', { domain, version: saved.version });
-  await refreshOperations();
+  try {
+    setPending(`config:${domain}`, true, submit);
+    const saved = await request(`/admin/config/${domain}`, { method: 'PUT', body: JSON.stringify({ config }) });
+    state.config[domain] = saved.config;
+    state.versions[domain] = saved.version;
+    fillConfigForm(domain);
+    logEvent('runtime_config_updated', { domain, version: saved.version });
+    await refreshRuntimeEvents();
+    await refreshOperations();
+  } catch (error) {
+    validationError(form, error.message);
+    logEvent('runtime_config_update_failed', { domain, error: error.message });
+  } finally {
+    setPending(`config:${domain}`, false, submit);
+  }
 }
 
 async function refreshRest() {
@@ -199,19 +263,29 @@ async function refreshOperations() {
     ['pnl', '/operations/pnl'],
     ['riskEvents', '/operations/risk-events'],
     ['auditLogs', '/operations/audit-logs?limit=100'],
+    ['runtimeEvents', '/operations/runtime-events?limit=100'],
     ['volume', '/operations/volume'],
     ['kill', '/operations/kill-switch']
   ];
   for (const [key, path] of calls) {
     try {
       const payload = await request(path);
-      if (key === 'orders' || key === 'trades' || key === 'positions' || key === 'riskEvents' || key === 'auditLogs') state.data[key] = payload.items || [];
+      if (key === 'orders' || key === 'trades' || key === 'positions' || key === 'riskEvents' || key === 'auditLogs' || key === 'runtimeEvents') state.data[key] = payload.items || [];
       else if (key === 'engines') state.data.engines = payload.engines || {};
       else if (key === 'exchanges') state.data.exchanges = payload.exchanges || {};
       else state.data[key] = payload;
     } catch (error) {
       logEvent('operations_endpoint_unavailable', { path, error: error.message });
     }
+  }
+}
+
+async function refreshRuntimeEvents() {
+  try {
+    state.data.runtimeEvents = (await request('/operations/runtime-events?limit=100')).items || [];
+    renderRuntimeAckState();
+  } catch (error) {
+    logEvent('runtime_events_unavailable', { error: error.message });
   }
 }
 
@@ -271,6 +345,8 @@ function initCoinstore() {
   $('coinstore-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.target;
+    const submit = form.querySelector('button[type="submit"]');
+    if (!validateRequired(form, ['account_alias', 'api_key', 'api_secret'])) return;
     const payload = {
       account_alias: form.account_alias.value.trim(),
       environment: form.environment.value,
@@ -280,22 +356,66 @@ function initCoinstore() {
       permissions: form.permissions.value.split(',').map((item) => item.trim()).filter(Boolean),
       is_enabled: form.is_enabled.value === 'true'
     };
-    const saved = await request('/admin/coinstore/accounts', { method: 'POST', body: JSON.stringify(payload) });
-    form.api_key.value = '';
-    form.api_secret.value = '';
-    form.passphrase.value = '';
-    logEvent('coinstore_account_saved', { id: saved.id, alias: saved.account_alias });
-    await refreshCoinstore();
-    renderCoinstore();
+    try {
+      setPending('coinstore:save', true, submit);
+      const saved = await request('/admin/coinstore/accounts', { method: 'POST', body: JSON.stringify(payload) });
+      form.api_key.value = '';
+      form.api_secret.value = '';
+      form.passphrase.value = '';
+      logEvent('coinstore_account_saved', { id: saved.id, alias: saved.account_alias });
+      await refreshCoinstore();
+      renderCoinstore();
+    } catch (error) {
+      validationError(form, error.message);
+      logEvent('coinstore_account_save_failed', { error: error.message });
+    } finally {
+      setPending('coinstore:save', false, submit);
+    }
   });
-  $('coinstore-health').addEventListener('click', async () => { state.data.coinstore.health = await request('/admin/coinstore/health'); renderCoinstore(); });
-  $('coinstore-sync').addEventListener('click', async () => {
+  $('coinstore-health').addEventListener('click', async (event) => {
+    try {
+      setPending('coinstore:health', true, event.target);
+      state.data.coinstore.health = await request('/admin/coinstore/health');
+      renderCoinstore();
+    } finally {
+      setPending('coinstore:health', false, event.target);
+    }
+  });
+  $('coinstore-sync').addEventListener('click', async (event) => {
     const confirmation = prompt('Type sync to confirm Coinstore balance sync');
     if (!confirmation) return;
-    const result = await request('/admin/coinstore/balance-sync', { method: 'POST', body: JSON.stringify({ confirmation, reason: 'operator balance sync' }) });
-    logEvent('coinstore_balance_sync', result);
-    await refreshOperations();
+    if (!confirmation.toLowerCase().includes('sync')) {
+      logEvent('coinstore_balance_sync_rejected', { reason: "confirmation must include 'sync'" });
+      return;
+    }
+    try {
+      setPending('coinstore:sync', true, event.target);
+      const result = await request('/admin/coinstore/balance-sync', { method: 'POST', body: JSON.stringify({ confirmation, reason: 'operator balance sync' }) });
+      logEvent('coinstore_balance_sync', result);
+      await refreshOperations();
+    } finally {
+      setPending('coinstore:sync', false, event.target);
+    }
   });
+}
+
+async function setCoinstoreAccountStatus(account, enabled, button) {
+  const word = enabled ? 'enable' : 'disable';
+  const confirmation = prompt(`Type ${word} to ${word} Coinstore account ${account.account_alias}`);
+  if (!confirmation) return;
+  if (!confirmation.toLowerCase().includes(word)) {
+    logEvent('coinstore_account_status_rejected', { account: account.id, reason: `confirmation must include '${word}'` });
+    return;
+  }
+  try {
+    setPending(`coinstore:status:${account.id}`, true, button);
+    await request(`/admin/coinstore/accounts/${account.id}/status`, { method: 'PUT', body: JSON.stringify({ is_enabled: enabled, confirmation, reason: `operator ${word} account` }) });
+    logEvent('coinstore_account_status_updated', { account: account.id, is_enabled: enabled });
+    await refreshCoinstore();
+    renderCoinstore();
+  } finally {
+    setPending(`coinstore:status:${account.id}`, false, button);
+  }
 }
 
 function initEmergency() {
@@ -317,11 +437,28 @@ function initEmergency() {
   $('emergency-actions').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.target;
+    const submit = form.querySelector('button[type="submit"]');
     const endpoint = actions.find(([id]) => id === form.dataset.endpoint)[3];
-    const result = await request(endpoint, { method: 'POST', body: JSON.stringify({ confirmation: form.confirmation.value, reason: form.reason.value }) });
-    $('kill-output').textContent = JSON.stringify(result, null, 2);
-    logEvent('emergency_action_accepted', { endpoint });
-    await refreshOperations();
+    const requiredWord = form.dataset.word;
+    if (!validateRequired(form, ['reason', 'confirmation'])) return;
+    if (!form.confirmation.value.toLowerCase().includes(requiredWord)) {
+      validationError(form, `Confirmation must include '${requiredWord}'`, ['confirmation']);
+      return;
+    }
+    try {
+      setPending(`emergency:${form.dataset.endpoint}`, true, submit);
+      const result = await request(endpoint, { method: 'POST', body: JSON.stringify({ confirmation: form.confirmation.value, reason: form.reason.value }) });
+      $('kill-output').textContent = JSON.stringify(result, null, 2);
+      logEvent('emergency_action_accepted', { endpoint, command_id: result.event?.command_id });
+      await refreshRuntimeEvents();
+      renderRuntimeAckState(result.event?.command_id);
+      await refreshOperations();
+    } catch (error) {
+      validationError(form, error.message);
+      logEvent('emergency_action_failed', { endpoint, error: error.message });
+    } finally {
+      setPending(`emergency:${form.dataset.endpoint}`, false, submit);
+    }
   });
 }
 
@@ -342,6 +479,7 @@ function renderAll() {
   renderExchanges();
   renderVolume();
   renderCoinstore();
+  renderRuntimeAckState();
 }
 
 function renderPnl() {
@@ -431,8 +569,32 @@ function renderCoinstore() {
     stackItem('WebSocket Health', health.websocket?.status || 'not checked'),
     stackItem('Rate Limit', health.rate_limit ? `${health.rate_limit.requests}/${health.rate_limit.window_seconds}s` : 'not returned'),
     stackItem('Stored Accounts', String(accounts.length)),
-    ...accounts.map((account) => stackItem(`${account.account_alias} ${account.environment}`, `${account.is_enabled ? 'enabled' : 'disabled'} key=${account.has_api_key} secret=${account.has_api_secret}`))
+    ...accounts.map((account) => accountItem(account))
   ].join('');
+  $('coinstore-state').querySelectorAll('[data-account-status]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const account = accounts.find((item) => item.id === button.dataset.accountId);
+      if (account) setCoinstoreAccountStatus(account, button.dataset.accountStatus === 'enable', button);
+    });
+  });
+}
+
+function accountItem(account) {
+  const next = account.is_enabled ? 'disable' : 'enable';
+  return `<div class="stack-item"><b>${esc(account.account_alias)} ${esc(account.environment)}</b><span class="pill ${account.is_enabled ? 'ok' : 'neutral'}">${account.is_enabled ? 'enabled' : 'disabled'} key=${account.has_api_key} secret=${account.has_api_secret}</span><button type="button" class="ghost" data-account-id="${esc(account.id)}" data-account-status="${next}">${title(next)}</button></div>`;
+}
+
+function renderRuntimeAckState(commandId) {
+  const target = $('runtime-ack-state');
+  if (!target) return;
+  const events = state.data.runtimeEvents || [];
+  const ack = commandId ? events.find((event) => event.command_id === commandId && String(event.event_type).includes('ack')) : events.find((event) => String(event.event_type).includes('ack'));
+  target.innerHTML = ack ? [
+    stackItem('Runtime Ack', `${ack.status} ${ack.event_type}`),
+    stackItem('Command ID', ack.command_id || 'none'),
+    stackItem('Component', ack.source_component || 'runtime'),
+    stackItem('Ack Time', ack.acknowledged_at || ack.created_at || 'pending')
+  ].join('') : stackItem('Runtime Ack', 'No acknowledgement yet');
 }
 
 function rows(items, cols, renderer) { return Array.isArray(items) && items.length ? items.map(renderer).join('') : emptyRow(cols); }
