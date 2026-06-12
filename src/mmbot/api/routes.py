@@ -18,7 +18,7 @@ from mmbot.api.schemas import DOMAIN_MODELS, ConfigResponse, ConfigUpdateRequest
 from mmbot.core.config import get_settings
 from mmbot.core.security import decode_token, require_admin, require_config_write, require_incident_response, require_operations_access, require_risk_write, require_trading_control
 from mmbot.db import models
-from mmbot.db.repositories import AuditRepository, ConfigRepository
+from mmbot.db.repositories import AuditRepository, ConfigRepository, RuntimeEventRepository
 from mmbot.engines.volume.engine import VolumeEngine
 from mmbot.db.session import Database
 from mmbot.exchanges.adapters import create_adapter, supported_exchanges
@@ -72,9 +72,9 @@ async def get_domain_config(domain: str, session: Annotated[AsyncSession, Depend
     repo = ConfigRepository(session)
     row = await repo.get_latest(domain)
     if row is None:
-        config = (await repo.runtime_config()).model_dump()[domain]
+        config = await repo.effective_domain_config(domain)
         return ConfigResponse(domain=domain, version=0, config=config)
-    return ConfigResponse(domain=domain, version=row.version, config=row.config)
+    return ConfigResponse(domain=domain, version=row.version, config=await repo.effective_domain_config(domain))
 
 
 @router.put("/admin/config/{domain}", response_model=ConfigResponse)
@@ -101,6 +101,11 @@ async def operations_runtime_config(session: Annotated[AsyncSession, Depends(get
 async def operations_audit_logs(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], limit: int = 100) -> dict:
     result = await session.execute(select(models.AuditLog).order_by(desc(models.AuditLog.occurred_at)).limit(limit))
     return {"items": [_audit_payload(row) for row in result.scalars().all()]}
+
+
+@router.get("/operations/runtime-events")
+async def operations_runtime_events(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], limit: int = 100) -> dict:
+    return {"items": [_runtime_event_payload(row) for row in await RuntimeEventRepository(session).recent(limit)]}
 
 
 @router.post("/admin/strategy/command")
@@ -621,6 +626,23 @@ def _audit_payload(row: models.AuditLog) -> dict:
         "before_state": row.before_state,
         "after_state": row.after_state,
         "occurred_at": _iso(row.occurred_at),
+    }
+
+
+def _runtime_event_payload(row: models.RuntimeEvent) -> dict:
+    return {
+        "id": str(row.id),
+        "event_type": row.event_type,
+        "source_component": row.source_component,
+        "status": row.status,
+        "command_id": row.command_id,
+        "config_domain": row.config_domain,
+        "config_version": row.config_version,
+        "correlation_id": row.correlation_id,
+        "payload": row.payload,
+        "metadata": row.metadata_json,
+        "acknowledged_at": _iso(row.acknowledged_at),
+        "created_at": _iso(row.created_at),
     }
 
 

@@ -19,6 +19,7 @@ from mmbot.execution.models import ExecutionVenue
 from mmbot.exchanges.types import Kline, OrderBookLevel, OrderBookSnapshot, Ticker, TradeTick
 from mmbot.observability.metrics import RuntimeMetrics
 from mmbot.redis.manager import EngineCommunicationLayer
+from mmbot.runtime.events import publish_runtime_ack
 from mmbot.websocket.connectors import StreamKind, StreamSubscription, VenueWebSocketConnector
 
 logger = logging.getLogger(__name__)
@@ -230,11 +231,13 @@ class MarketDataRuntime:
                 if not isinstance(data, str):
                     continue
                 payload = json.loads(data)
+                command_id = str(payload.get("command_id") or "")
                 runtime_payload = payload.get("runtime_config") or payload.get("payload", {}).get("runtime_config")
                 if isinstance(runtime_payload, dict):
                     config = RuntimeConfig.model_validate(runtime_payload)
                     self.engine.liquidity_settings = config.liquidity
                     self.metrics.increment("runtime.config_reloads")
+                    await publish_runtime_ack(self.session, self.bus, component="market-data-engine", command_id=command_id or None, event_type="runtime_config_reload_ack", status="acknowledged", payload={"domains": list(runtime_payload.keys())})
                     logger.info("market_data_runtime_config_reloaded", extra={"channel": channel})
             except asyncio.CancelledError:
                 raise

@@ -24,6 +24,7 @@ from mmbot.observability.metrics import RuntimeMetrics
 from mmbot.production.canary import CanaryController, CanaryPolicy, CanaryState, LaunchMode
 from mmbot.reconciliation.engine import ReconciliationEngine
 from mmbot.redis.manager import EngineCommunicationLayer
+from mmbot.runtime.events import publish_runtime_ack
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,9 @@ class MarketMakerRuntime:
         except Exception as exc:
             reason = "kill_switch_state_unavailable"
             self.metrics.increment("risk.kill_switch_read_failures")
+            if self.mode in {LaunchMode.paper, LaunchMode.shadow}:
+                logger.warning("kill_switch_read_failed_non_live_mode", extra={"reason": reason, "error": str(exc), "mode": self.mode.value})
+                return False
             self.canary.activate_shutdown(reason)
             logger.critical("kill_switch_read_failed", extra={"reason": reason, "error": str(exc), "mode": self.mode.value})
             return True
@@ -180,7 +184,8 @@ class MarketMakerRuntime:
                 if channel.startswith("marketdata:"):
                     await self.ingest_market_event(channel, payload)
                 elif channel.startswith("runtime.config."):
-                    await self._apply_config_payload(payload)
+                    command_id = payload.get("command_id") if isinstance(payload, dict) else None
+                    await self._apply_config_payload(payload, command_id=str(command_id) if command_id else None)
                 elif channel == "engine.commands.market-maker-engine":
                     await self._handle_command(payload)
             except asyncio.CancelledError:
@@ -190,7 +195,7 @@ class MarketMakerRuntime:
                 logger.warning("market_maker_bus_consumer_recovered", extra={"error": str(exc)})
                 await asyncio.sleep(1.0)
 
-    async def _apply_config_payload(self, payload: dict[str, Any]) -> None:
+    async def _apply_config_payload(self, payload: dict[str, Any], command_id: str | None = None) -> None:
         runtime_payload = payload.get("runtime_config") or payload.get("payload", {}).get("runtime_config")
         if not isinstance(runtime_payload, dict):
             return
@@ -203,13 +208,15 @@ class MarketMakerRuntime:
         self.trading_enabled = runtime_config.strategy.trading_enabled
         self.quoting_enabled = runtime_config.strategy.quoting_enabled
         self.metrics.increment("runtime.config_reloads")
+        await publish_runtime_ack(self.session, self.bus, component="market-maker-engine", command_id=command_id or str(payload.get("command_id") or ""), event_type="runtime_config_reload_ack", status="acknowledged", payload={"domains": list(runtime_payload.keys())})
         logger.info("runtime_config_reloaded", extra={"domains": list(runtime_payload.keys())})
 
     async def _handle_command(self, message: dict[str, Any]) -> None:
+        command_id = str(message.get("command_id") or "")
         command = str(message.get("command_type") or "").upper()
         payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
         if command == "CONFIG_RELOAD":
-            await self._apply_config_payload(payload)
+            await self._apply_config_payload(payload, command_id=command_id)
         elif command in {"DISABLE_TRADING", "EMERGENCY_SHUTDOWN"}:
             self.trading_enabled = False
             self.quoting_enabled = False
@@ -239,6 +246,7 @@ class MarketMakerRuntime:
                 self.trading_enabled = True
                 self.quoting_enabled = True
         self.metrics.increment(f"runtime.commands.{command.lower() or 'unknown'}")
+        await publish_runtime_ack(self.session, self.bus, component="market-maker-engine", command_id=command_id or None, event_type="runtime_command_ack", status="acknowledged", payload={"command_type": command})
 
     async def _quote_symbol(self, symbol: str) -> None:
         if not self.trading_enabled or not self.quoting_enabled or not self.runtime_config.strategy.quoting_enabled:

@@ -45,12 +45,24 @@ class ConfigRepository(Repository[models.BotConfig]):
         row = models.BotConfig(name=domain, version=version, status=models.BotStatus.enabled, config=config, risk_limits={}, created_by=actor_user_id, approved_by=actor_user_id, approved_at=datetime.now(timezone.utc))
         return await self.add(row)
 
+    async def effective_domain_config(self, domain: str, overlay: dict[str, Any] | None = None) -> dict[str, Any]:
+        baseline = default_runtime_config().model_dump()
+        if domain not in baseline:
+            raise KeyError(domain)
+        merged = dict(baseline[domain])
+        row = await self.get_latest(domain)
+        if row is not None:
+            merged = _deep_merge(merged, row.config)
+        if overlay is not None:
+            merged = _deep_merge(merged, overlay)
+        return merged
+
     async def runtime_config(self) -> RuntimeConfig:
         baseline = default_runtime_config().model_dump()
         for domain in baseline:
             row = await self.get_latest(domain)
             if row is not None:
-                baseline[domain] = row.config
+                baseline[domain] = _deep_merge(baseline[domain], row.config)
         return RuntimeConfig.model_validate(baseline)
 
 
@@ -100,3 +112,50 @@ class AuditRepository(Repository[models.AuditLog]):
                 metadata_json=metadata,
             )
         )
+
+
+class RuntimeEventRepository(Repository[models.RuntimeEvent]):
+    model = models.RuntimeEvent
+
+    async def record(
+        self,
+        *,
+        event_type: str,
+        source_component: str,
+        status: str,
+        payload: dict[str, Any],
+        command_id: str | None = None,
+        config_domain: str | None = None,
+        config_version: int | None = None,
+        correlation_id: str | None = None,
+        acknowledged_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> models.RuntimeEvent:
+        return await self.add(
+            models.RuntimeEvent(
+                event_type=event_type,
+                source_component=source_component,
+                status=status,
+                command_id=command_id,
+                config_domain=config_domain,
+                config_version=config_version,
+                correlation_id=correlation_id,
+                payload=payload,
+                acknowledged_at=acknowledged_at,
+                metadata_json=metadata or {},
+            )
+        )
+
+    async def recent(self, limit: int = 100) -> list[models.RuntimeEvent]:
+        result = await self.session.execute(select(models.RuntimeEvent).order_by(desc(models.RuntimeEvent.created_at)).limit(limit))
+        return list(result.scalars().all())
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in (overlay or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged

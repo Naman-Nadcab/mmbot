@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mmbot.db.repositories import AuditRepository, ConfigRepository
+from mmbot.db.repositories import AuditRepository, ConfigRepository, RuntimeEventRepository
 from mmbot.redis.manager import RedisManager
 
 RUNTIME_CONFIG_UPDATED_CHANNEL = "runtime.config.updated"
@@ -24,7 +24,8 @@ class RuntimeConfigService:
     async def update_domain(self, domain: str, model: type[BaseModel], payload: dict[str, Any], actor: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         repo = ConfigRepository(self.session)
         before = await repo.get_latest(domain)
-        validated = model.model_validate(payload).model_dump()
+        effective = await repo.effective_domain_config(domain, payload)
+        validated = model.model_validate(effective).model_dump()
         actor_user_id = _actor_uuid(actor)
         row = await repo.upsert_domain(domain, validated, actor_user_id)
         runtime_config = (await repo.runtime_config()).model_dump()
@@ -39,8 +40,10 @@ class RuntimeConfigService:
             after_state=validated,
         )
         await self.session.flush()
+        command_id = str(uuid.uuid4())
         event = {
             "event_type": "runtime_config_updated",
+            "command_id": command_id,
             "domain": domain,
             "version": row.version,
             "config": validated,
@@ -49,14 +52,26 @@ class RuntimeConfigService:
             "actor": actor.get("sub"),
             "published_at": time.time(),
         }
+        runtime_event = await RuntimeEventRepository(self.session).record(
+            event_type="runtime_config_updated",
+            source_component="api",
+            status="published",
+            command_id=command_id,
+            config_domain=domain,
+            config_version=row.version,
+            correlation_id=str(audit.id),
+            payload=event,
+            metadata={"redis_channels": [RUNTIME_CONFIG_UPDATED_CHANNEL, f"runtime.config.{domain}.updated", RUNTIME_EVENTS_CHANNEL, MARKET_MAKER_COMMAND_CHANNEL]},
+        )
+        event["runtime_event_id"] = str(runtime_event.id)
         await self.redis.client.set("runtime:config:latest", _json(event["runtime_config"]))
         await self.redis.client.set(f"runtime:config:{domain}:latest", _json(validated))
         await self.redis.client.publish(RUNTIME_CONFIG_UPDATED_CHANNEL, _json(event))
         await self.redis.client.publish(f"runtime.config.{domain}.updated", _json(event))
         await self.redis.client.publish(RUNTIME_EVENTS_CHANNEL, _json(event))
-        await self.redis.client.publish(MARKET_MAKER_COMMAND_CHANNEL, _json({"command_type": "CONFIG_RELOAD", "payload": event, "published_at": time.time()}))
+        await self.redis.client.publish(MARKET_MAKER_COMMAND_CHANNEL, _json({"command_id": command_id, "command_type": "CONFIG_RELOAD", "payload": event, "published_at": time.time()}))
         if domain in {"exchange", "liquidity"}:
-            await self.redis.client.publish(MARKET_DATA_COMMAND_CHANNEL, _json({"command_type": "CONFIG_RELOAD", "payload": event, "published_at": time.time()}))
+            await self.redis.client.publish(MARKET_DATA_COMMAND_CHANNEL, _json({"command_id": command_id, "command_type": "CONFIG_RELOAD", "payload": event, "published_at": time.time()}))
         return row.version, validated
 
 
@@ -83,11 +98,23 @@ async def publish_runtime_command(
         after_state=payload,
     )
     await session.flush()
+    command_id = str(uuid.uuid4())
     event = {
+        "command_id": command_id,
         "command_type": command_type,
         "payload": payload | {"audit_log_id": str(audit.id), "actor": actor.get("sub")},
         "published_at": time.time(),
     }
+    runtime_event = await RuntimeEventRepository(session).record(
+        event_type="runtime_command",
+        source_component="api",
+        status="published",
+        command_id=command_id,
+        correlation_id=str(audit.id),
+        payload=event,
+        metadata={"redis_channel": channel},
+    )
+    event["runtime_event_id"] = str(runtime_event.id)
     await redis.client.publish(channel, _json(event))
     await redis.client.publish(RUNTIME_EVENTS_CHANNEL, _json({"event_type": "runtime_command", **event}))
     return event

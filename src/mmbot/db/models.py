@@ -349,6 +349,23 @@ class AuditLog(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class RuntimeEvent(Base):
+    __tablename__ = "runtime_events"
+    id = uuid_pk()
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_component: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    command_id: Mapped[str | None] = mapped_column(Text)
+    config_domain: Mapped[str | None] = mapped_column(Text)
+    config_version: Mapped[int | None] = mapped_column(Integer)
+    correlation_id: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict[str, Any]] = mapped_column(PortableJSON, default=dict, nullable=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", PortableJSON, default=dict, nullable=False)
+    __table_args__ = (Index("idx_runtime_events_created_at", "created_at"), Index("idx_runtime_events_command_id", "command_id"), Index("idx_runtime_events_type_status", "event_type", "status"))
+
+
 class SystemHealth(Base):
     __tablename__ = "system_health"
     id = uuid_pk()
