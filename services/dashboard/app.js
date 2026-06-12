@@ -74,9 +74,22 @@ async function request(path, options = {}) {
   const response = await fetch(`${state.apiBase}${path}`, { ...options, headers: { ...headers(Boolean(options.body)), ...(options.headers || {}) } });
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 401) {
+      clearStoredToken('backend rejected token; generate a fresh backend-signed JWT');
+    }
     throw new Error(`${path} ${response.status} ${text.slice(0, 180)}`);
   }
   return response.status === 204 ? null : response.json();
+}
+
+function clearStoredToken(reason) {
+  state.token = '';
+  localStorage.removeItem('ops.token');
+  const input = $('bearer-token');
+  if (input) input.value = '';
+  setPill('ws-status', 'Token rejected', 'bad');
+  logEvent('auth_token_cleared', { reason });
+  disconnectWebSocket();
 }
 
 function logEvent(message, payload) {

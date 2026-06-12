@@ -28,6 +28,7 @@ test = ["pytest==9.0.3", "pytest-asyncio==1.4.0"]
 
 [project.scripts]
 mmbot-api = "mmbot.api.main:run"
+mmbot-auth = "mmbot.cli.auth:main"
 mmbot-db = "mmbot.cli.database:main"
 mmbot-engine = "mmbot.cli.engine:main"
 
