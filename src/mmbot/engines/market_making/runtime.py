@@ -21,6 +21,7 @@ from mmbot.execution.coinstore import CoinstoreExecutionService
 from mmbot.execution.coinstore_ws import CoinstorePrivateWebSocketClient
 from mmbot.execution.models import ExecutionOrderType, ExecutionSide, ExecutionVenue, OrderIntent, TimeInForce
 from mmbot.execution.paper import PaperExecutionEngine
+from mmbot.execution.precision import quantize_down
 from mmbot.exchanges.types import OrderBookLevel, OrderBookSnapshot
 from mmbot.observability.metrics import RuntimeMetrics
 from mmbot.production.canary import CanaryController, CanaryPolicy, CanaryState, LaunchMode
@@ -229,6 +230,7 @@ class MarketMakerRuntime:
         command_id = str(message.get("command_id") or "")
         command = str(message.get("command_type") or "").upper()
         payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+        result_payload: dict[str, Any] = {}
         if command == "CONFIG_RELOAD":
             await self._apply_config_payload(payload, command_id=command_id)
         elif command in {"DISABLE_TRADING", "EMERGENCY_SHUTDOWN"}:
@@ -243,7 +245,7 @@ class MarketMakerRuntime:
         elif command == "CANCEL_ALL_ORDERS":
             await self._cancel_all_orders()
         elif command == "CLOSE_POSITIONS":
-            await self._close_paper_positions()
+            result_payload["close_positions"] = await self._close_positions()
         elif command == "RUNTIME_RESTART":
             await self._cancel_all_orders()
             self.latest_ticker.clear()
@@ -260,7 +262,7 @@ class MarketMakerRuntime:
                 self.trading_enabled = True
                 self.quoting_enabled = True
         self.metrics.increment(f"runtime.commands.{command.lower() or 'unknown'}")
-        await publish_runtime_ack(self.session, self.bus, component="market-maker-engine", command_id=command_id or None, event_type="runtime_command_ack", status="acknowledged", payload={"command_type": command})
+        await publish_runtime_ack(self.session, self.bus, component="market-maker-engine", command_id=command_id or None, event_type="runtime_command_ack", status="acknowledged", payload={"command_type": command, **result_payload})
 
     async def _quote_symbol(self, symbol: str) -> None:
         if not self.trading_enabled or not self.quoting_enabled or not self.runtime_config.strategy.quoting_enabled:
@@ -450,12 +452,81 @@ class MarketMakerRuntime:
 
         await self.coinstore_private_ws.run(handler)
 
-    async def _close_paper_positions(self) -> None:
+    async def _close_positions(self) -> dict[str, object]:
+        if self.mode in {LaunchMode.canary, LaunchMode.live}:
+            return await self._close_coinstore_positions()
+        return await self._close_paper_positions()
+
+    async def _close_coinstore_positions(self) -> dict[str, object]:
+        service = await self._coinstore()
+        client = await service.client()
+        balances = await client.sync_balances()
+        results: list[dict[str, object]] = []
+        for symbol in self.settings.MARKET_DATA_SYMBOLS:
+            if "/" not in symbol:
+                results.append({"symbol": symbol, "status": "skipped", "reason": "symbol_not_normalized"})
+                continue
+            base_asset = symbol.split("/", 1)[0].upper()
+            balance = next((item for item in balances if item.asset.upper() == base_asset), None)
+            if balance is None or balance.available <= 0:
+                results.append({"symbol": symbol, "status": "skipped", "reason": "no_available_base_balance"})
+                continue
+            orderbook_key = next((key for key in self.latest_orderbook if key.endswith(f":{symbol}")), None)
+            if orderbook_key is None:
+                results.append({"symbol": symbol, "status": "skipped", "reason": "orderbook_unavailable"})
+                continue
+            orderbook = self.latest_orderbook[orderbook_key]
+            if not orderbook.bids:
+                results.append({"symbol": symbol, "status": "skipped", "reason": "best_bid_unavailable"})
+                continue
+            try:
+                precision = await service.precision_for_symbol(symbol)
+                quantity = quantize_down(balance.available, precision.quantity_step)
+                price = quantize_down(Decimal(str(max(level.price for level in orderbook.bids))), precision.price_tick)
+                if quantity < precision.min_quantity:
+                    results.append({"symbol": symbol, "status": "skipped", "reason": "quantity_below_minimum", "quantity": str(quantity)})
+                    continue
+                notional = quantity * price
+                if notional < precision.min_notional:
+                    results.append({"symbol": symbol, "status": "skipped", "reason": "notional_below_minimum", "notional": str(notional)})
+                    continue
+                intent = OrderIntent(
+                    venue=ExecutionVenue.coinstore,
+                    symbol=symbol,
+                    side=ExecutionSide.sell,
+                    order_type=ExecutionOrderType.limit,
+                    quantity=quantity,
+                    price=price,
+                    client_order_id=f"emergency-close-{uuid.uuid4().hex[:12]}",
+                    time_in_force=TimeInForce.ioc,
+                    reduce_only=True,
+                    metadata={"action": "close_position"},
+                )
+                risk_intent = RiskOrderIntent(symbol, "sell", float(price), float(quantity))
+                self.risk_engine.assert_order_allowed(
+                    risk_intent,
+                    position_notional=float(notional),
+                    total_exposure=float(notional),
+                    open_orders=await self._coinstore_open_order_count(),
+                    daily_pnl=0.0,
+                )
+                decision = self.canary.evaluate(intent)
+                if not decision.accepted or not decision.execution_allowed:
+                    results.append({"symbol": symbol, "status": "rejected", "reason": decision.reason})
+                    continue
+                order = await service.place_order(intent)
+                self.metrics.increment("coinstore.positions_close_orders")
+                results.append({"symbol": symbol, "status": "submitted", "client_order_id": order.client_order_id, "exchange_order_id": order.exchange_order_id, "quantity": str(quantity), "price": str(price)})
+            except Exception as exc:
+                results.append({"symbol": symbol, "status": "failed", "reason": str(exc)})
+        return {"venue": "coinstore", "results": results}
+
+    async def _close_paper_positions(self) -> dict[str, object]:
         if not self.latest_orderbook:
-            return
+            return {"venue": "paper", "results": [{"status": "skipped", "reason": "orderbook_unavailable"}]}
         base_quantity = self.paper.account.balances.get(self.settings.PAPER_BASE_ASSET, Decimal("0"))
         if base_quantity == 0:
-            return
+            return {"venue": "paper", "results": [{"status": "skipped", "reason": "no_position"}]}
         symbol = f"{self.settings.PAPER_BASE_ASSET}/{self.settings.PAPER_QUOTE_ASSET}"
         orderbook = next(iter(self.latest_orderbook.values()))
         best_bid = max(level.price for level in orderbook.bids) if orderbook.bids else None
@@ -469,10 +540,22 @@ class MarketMakerRuntime:
             price = Decimal(str(best_ask))
             quantity = abs(base_quantity)
         else:
-            return
+            return {"venue": "paper", "results": [{"status": "skipped", "reason": "close_price_unavailable"}]}
         intent = OrderIntent(ExecutionVenue.binance, symbol, side, ExecutionOrderType.limit, quantity, price, f"emergency-close-{uuid.uuid4().hex[:12]}", TimeInForce.ioc)
-        await self.paper.place_order(intent, orderbook)
+        order = await self.paper.place_order(intent, orderbook)
         self.metrics.increment("runtime.close_positions")
+        return {"venue": "paper", "results": [{"status": "submitted", "client_order_id": order.intent.client_order_id, "exchange_order_id": order.exchange_order_id, "quantity": str(quantity), "price": str(price)}]}
+
+    async def _coinstore_open_order_count(self) -> int:
+        service = await self._coinstore()
+        account = await service.account()
+        result = await self.session.execute(
+            select(models.Order).where(
+                models.Order.exchange_account_id == account.id,
+                models.Order.status.in_([models.OrderStatus.open, models.OrderStatus.submitted, models.OrderStatus.partially_filled, models.OrderStatus.created]),
+            )
+        )
+        return len(result.scalars().all())
 
     async def _maybe_reconcile(self) -> None:
         now = datetime.now(timezone.utc)

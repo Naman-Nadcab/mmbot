@@ -1,64 +1,431 @@
 openapi: 3.1.0
 info:
   title: Institutional Market Making Platform API
-  version: 0.1.0-bootstrap
-  description: Bootstrap API contract. No trading logic or exchange integrations are implemented.
+  version: 0.2.0
+  description: Runtime control, operations, Coinstore, and emergency API contract.
 servers:
   - url: http://localhost:8000
     description: Local development gateway
 tags:
   - name: Health
-  - name: Administration
+  - name: Runtime Config
+  - name: Operations
+  - name: Strategy
+  - name: Coinstore
+  - name: Emergency
   - name: Risk
+security:
+  - bearerAuth: []
 paths:
   /health:
     get:
       tags: [Health]
+      security: []
       summary: Liveness check
       responses:
-        '200':
-          description: Service is alive
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HealthResponse'
+        '200': {description: Health state, content: {application/json: {schema: {$ref: '#/components/schemas/HealthResponse'}}}}
   /ready:
     get:
       tags: [Health]
+      security: []
       summary: Readiness check
       responses:
-        '200':
-          description: Dependencies are ready
-        '503':
-          description: One or more dependencies are unavailable
+        '200': {description: Readiness state, content: {application/json: {schema: {$ref: '#/components/schemas/HealthResponse'}}}}
   /version:
     get:
       tags: [Health]
-      summary: Build and deployment version
+      security: []
+      summary: Build version
       responses:
-        '200':
-          description: Version information
-  /admin/kill-switch:
+        '200': {description: Version payload, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+
+  /admin/config:
+    get:
+      tags: [Runtime Config]
+      summary: Get full runtime configuration
+      responses:
+        '200': {description: Runtime configuration, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/config/{domain}:
+    get:
+      tags: [Runtime Config]
+      summary: Get effective runtime configuration domain
+      parameters:
+        - {$ref: '#/components/parameters/Domain'}
+      responses:
+        '200': {description: Domain configuration, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigResponse'}}}}
+    put:
+      tags: [Runtime Config]
+      summary: Update runtime configuration domain
+      parameters:
+        - {$ref: '#/components/parameters/Domain'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfigUpdateRequest'}
+      responses:
+        '200': {description: Persisted config, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigResponse'}}}}
+  /operations/runtime-config:
+    get:
+      tags: [Runtime Config, Operations]
+      summary: Read effective runtime configuration
+      responses:
+        '200': {description: Runtime config, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/runtime-events:
+    get:
+      tags: [Runtime Config, Operations]
+      summary: Runtime command and reload event history
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Runtime event history, content: {application/json: {schema: {$ref: '#/components/schemas/ItemsResponse'}}}}
+  /operations/audit-logs:
+    get:
+      tags: [Operations]
+      summary: Audit log history
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Audit logs, content: {application/json: {schema: {$ref: '#/components/schemas/ItemsResponse'}}}}
+
+  /admin/strategy/command:
     post:
-      tags: [Administration, Risk]
-      summary: Planned emergency kill switch endpoint
-      description: Emergency-control API contract requiring RBAC, MFA, audit logging, and risk authorization.
-      security:
-        - bearerAuth: []
+      tags: [Strategy]
+      summary: Send strategy runtime command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StrategyCommandRequest'}
       responses:
-        '501':
-          description: Not implemented in bootstrap foundation
+        '200': {description: Command accepted, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+
+  /operations/engines:
+    get:
+      tags: [Operations]
+      summary: Engine health from Redis
+      responses:
+        '200': {description: Engine health, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/infrastructure:
+    get:
+      tags: [Operations]
+      summary: Database and Redis health
+      responses:
+        '200': {description: Infrastructure health, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/exchanges:
+    get:
+      tags: [Operations]
+      summary: Exchange connectivity state
+      responses:
+        '200': {description: Exchange state, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/orders:
+    get:
+      tags: [Operations]
+      summary: Recent orders
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Orders, content: {application/json: {schema: {$ref: '#/components/schemas/ItemsResponse'}}}}
+  /operations/trades:
+    get:
+      tags: [Operations]
+      summary: Recent trades
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Trades, content: {application/json: {schema: {$ref: '#/components/schemas/ItemsResponse'}}}}
+  /operations/positions:
+    get:
+      tags: [Operations]
+      summary: Positions
+      responses:
+        '200': {description: Positions, content: {application/json: {schema: {$ref: '#/components/schemas/ItemsResponse'}}}}
+  /operations/inventory:
+    get:
+      tags: [Operations]
+      summary: Inventory snapshots
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Inventory, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/pnl:
+    get:
+      tags: [Operations]
+      summary: PnL summary
+      responses:
+        '200': {description: PnL, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/risk-events:
+    get:
+      tags: [Operations, Risk]
+      summary: Risk events
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Risk events, content: {application/json: {schema: {$ref: '#/components/schemas/ItemsResponse'}}}}
+  /operations/reconciliation:
+    get:
+      tags: [Operations]
+      summary: Reconciliation summary
+      responses:
+        '200': {description: Reconciliation state, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/volume:
+    get:
+      tags: [Operations]
+      summary: Volume target progress
+      responses:
+        '200': {description: Volume progress, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/kill-switch:
+    get:
+      tags: [Operations, Risk]
+      summary: Kill-switch status
+      responses:
+        '200': {description: Kill-switch state, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /operations/canary-limits:
+    get:
+      tags: [Operations, Risk]
+      summary: Canary limits
+      responses:
+        '200': {description: Canary limits, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+
+  /admin/exchanges/capabilities:
+    get:
+      tags: [Operations]
+      summary: Supported exchange capabilities
+      responses:
+        '200': {description: Exchange capabilities, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/coinstore/accounts:
+    get:
+      tags: [Coinstore]
+      summary: List Coinstore exchange accounts without secret values
+      responses:
+        '200': {description: Coinstore accounts, content: {application/json: {schema: {$ref: '#/components/schemas/ItemsResponse'}}}}
+    post:
+      tags: [Coinstore]
+      summary: Store or rotate encrypted Coinstore API credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExchangeAccountCreateRequest'}
+      responses:
+        '200': {description: Account metadata, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/coinstore/accounts/{account_id}/status:
+    put:
+      tags: [Coinstore]
+      summary: Enable or disable Coinstore account
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExchangeAccountStatusRequest'}
+      responses:
+        '200': {description: Account metadata, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/coinstore/health:
+    get:
+      tags: [Coinstore]
+      summary: Coinstore REST/WebSocket/rate-limit health
+      responses:
+        '200': {description: Coinstore health, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/coinstore/balance-sync:
+    post:
+      tags: [Coinstore]
+      summary: Sync Coinstore balances into inventory snapshots
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmedActionRequest'}
+      responses:
+        '200': {description: Sync result, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+
+  /admin/kill-switch/status:
+    get:
+      tags: [Risk]
+      summary: Admin kill-switch status
+      responses:
+        '200': {description: Kill-switch state, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/kill-switch/enable:
+    post:
+      tags: [Risk]
+      summary: Enable kill switch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ObjectResponse'}
+      responses:
+        '200': {description: Kill-switch state, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/kill-switch/disable:
+    post:
+      tags: [Risk]
+      summary: Disable kill switch
+      responses:
+        '200': {description: Kill-switch state, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+
+  /admin/emergency/cancel-all-orders:
+    post:
+      tags: [Emergency]
+      summary: Cancel all open orders through runtime execution path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmedActionRequest'}
+      responses:
+        '200': {description: Runtime command event, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/emergency/disable-trading:
+    post:
+      tags: [Emergency]
+      summary: Disable trading and activate kill switch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmedActionRequest'}
+      responses:
+        '200': {description: Runtime command event, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/emergency/enable-trading:
+    post:
+      tags: [Emergency]
+      summary: Clear kill switch and enable trading
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmedActionRequest'}
+      responses:
+        '200': {description: Runtime command event, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/emergency/close-positions:
+    post:
+      tags: [Emergency]
+      summary: Close open positions through runtime execution path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmedActionRequest'}
+      responses:
+        '200': {description: Runtime command event; execution results are emitted in runtime acknowledgement history, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/emergency/runtime-restart:
+    post:
+      tags: [Emergency]
+      summary: Request runtime restart/reset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmedActionRequest'}
+      responses:
+        '200': {description: Runtime command event, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+  /admin/emergency/shutdown:
+    post:
+      tags: [Emergency]
+      summary: Emergency shutdown
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmedActionRequest'}
+      responses:
+        '200': {description: Runtime command event, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectResponse'}}}}
+
+  /ws/operations:
+    get:
+      tags: [Operations]
+      summary: Operations WebSocket stream
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '101': {description: WebSocket upgrade}
+
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    Domain:
+      name: domain
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [strategy, spread, order_layers, order_size, volume, inventory, risk, exchange, liquidity, alert]
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 1000, default: 100}
   schemas:
     HealthResponse:
       type: object
-      required: [status]
+      required: [status, dependencies]
       properties:
-        status:
-          type: string
-          enum: [ok]
+        status: {type: string}
+        dependencies:
+          type: object
+          additionalProperties: {type: string}
+    ObjectResponse:
+      type: object
+      additionalProperties: true
+    ItemsResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {type: object, additionalProperties: true}
+    ConfigUpdateRequest:
+      type: object
+      required: [config]
+      properties:
+        config: {type: object, additionalProperties: true}
+    ConfigResponse:
+      type: object
+      required: [domain, version, config]
+      properties:
+        domain: {type: string}
+        version: {type: integer}
+        config: {type: object, additionalProperties: true}
+    ConfirmedActionRequest:
+      type: object
+      required: [confirmation, reason]
+      properties:
+        confirmation: {type: string, minLength: 3}
+        reason: {type: string, minLength: 3}
+    StrategyCommandRequest:
+      allOf:
+        - {$ref: '#/components/schemas/ConfirmedActionRequest'}
+        - type: object
+          required: [command]
+          properties:
+            command: {type: string, enum: [start, pause, resume, stop]}
+    ExchangeAccountCreateRequest:
+      type: object
+      required: [account_alias, environment, api_key, api_secret]
+      properties:
+        account_alias: {type: string}
+        environment: {type: string, enum: [sandbox, staging, production]}
+        api_key: {type: string, writeOnly: true}
+        api_secret: {type: string, writeOnly: true}
+        passphrase: {type: string, nullable: true, writeOnly: true}
+        permissions:
+          type: array
+          items: {type: string}
+        is_enabled: {type: boolean}
+    ExchangeAccountStatusRequest:
+      allOf:
+        - {$ref: '#/components/schemas/ConfirmedActionRequest'}
+        - type: object
+          required: [is_enabled]
+          properties:
+            is_enabled: {type: boolean}

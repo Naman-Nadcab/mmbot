@@ -11,28 +11,50 @@ from mmbot.db.session import Database
 from mmbot.engines.market_making.engine import Quote, QuoteEngine
 from mmbot.engines.market_making.runtime import MarketMakerRuntime
 from mmbot.execution.coinstore_reconciliation import CoinstoreReconciliationReport
-from mmbot.execution.models import ExecutionOrder, ExecutionOrderType, ExecutionSide, ExecutionVenue, NormalizedOrderStatus
+from mmbot.execution.models import Balance, ExecutionOrder, ExecutionOrderType, ExecutionSide, ExecutionVenue, NormalizedOrderStatus, SymbolPrecision
 from mmbot.exchanges.types import OrderBookLevel, OrderBookSnapshot
 from mmbot.observability.metrics import RuntimeMetrics
 from mmbot.reconciliation.engine import ReconciliationMismatch, ReconciliationSeverity, ReconciliationSnapshot
 
 
 class MemoryBus:
-    cache = None
-    pubsub = None
+    def __init__(self):
+        self.cache = type("Cache", (), {"data": {}, "set_json": self._set_json})()
+        self.pubsub = type("PubSub", (), {"published": [], "publish": self._publish})()
+
+    async def _set_json(self, key, value, ttl_seconds=None):
+        self.cache.data[key] = value
+
+    async def _publish(self, channel, payload):
+        self.pubsub.published.append((channel, payload))
+        return 1
+
+
+class RecordingCoinstoreRestClient:
+    credentials = type("Credentials", (), {"api_key": "key", "api_secret": "secret"})()
+
+    async def sync_balances(self):
+        return [Balance(ExecutionVenue.coinstore, "BTC", Decimal("0.100"), Decimal("0.100"), Decimal("0"), {})]
 
 
 class RecordingCoinstoreService:
     def __init__(self):
         self.orders = []
         self.private_messages = []
+        self.rest_client = RecordingCoinstoreRestClient()
 
     async def place_order(self, intent):
         self.orders.append(intent)
         return ExecutionOrder(ExecutionVenue.coinstore, intent.symbol, intent.client_order_id, "live-1", NormalizedOrderStatus.open, intent.side, intent.order_type, intent.price, intent.quantity, Decimal("0"), None, None, {})
 
     async def client(self):
-        return type("RestClient", (), {"credentials": type("Credentials", (), {"api_key": "key", "api_secret": "secret"})()})()
+        return self.rest_client
+
+    async def account(self):
+        return type("Account", (), {"id": "account-1"})()
+
+    async def precision_for_symbol(self, symbol):
+        return SymbolPrecision(symbol, symbol.replace("/", ""), Decimal("0.01"), Decimal("0.001"), Decimal("0.001"), Decimal("10"), 2, 3)
 
     async def handle_private_message(self, message):
         self.private_messages.append(message)
@@ -145,5 +167,33 @@ async def test_canary_runtime_uses_live_coinstore_reconciliation():
         assert runtime.metrics.counters["reconciliation.mismatches"] == 1
         assert runtime.metrics.counters["coinstore.reconciliation.stale_orders"] == 1
         assert runtime.metrics.counters["coinstore.reconciliation.orphan_orders"] == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_canary_runtime_close_positions_uses_coinstore_execution_and_ack():
+    settings = _settings()
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session = database.session_factory()
+        config = default_runtime_config()
+        bus = MemoryBus()
+        runtime = MarketMakerRuntime(settings, session, bus, QuoteEngine(config.spread, config.order_size, config.inventory, config.order_layers), RuntimeMetrics(), config)
+        coinstore = RecordingCoinstoreService()
+        runtime.coinstore = coinstore
+        runtime.latest_orderbook["coinstore:BTC/USDT"] = OrderBookSnapshot("coinstore", "BTC/USDT", [OrderBookLevel(100.00, 5)], [OrderBookLevel(101.00, 5)], datetime.now(timezone.utc))
+
+        await runtime._handle_command({"command_id": "close-1", "command_type": "CLOSE_POSITIONS", "payload": {"reason": "test close"}})
+
+        assert len(coinstore.orders) == 1
+        assert coinstore.orders[0].venue is ExecutionVenue.coinstore
+        assert coinstore.orders[0].side is ExecutionSide.sell
+        assert coinstore.orders[0].quantity == Decimal("0.100")
+        ack = bus.cache.data["runtime:ack:close-1:market-maker-engine"]
+        assert ack["payload"]["close_positions"]["venue"] == "coinstore"
+        assert ack["payload"]["close_positions"]["results"][0]["status"] == "submitted"
     finally:
         await database.close()
