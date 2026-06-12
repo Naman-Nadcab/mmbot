@@ -125,6 +125,8 @@ class VenueWebSocketCodec:
             return {"op": "subscribe", "args": [self._bitmart_stream(subscription, symbol)]}
         if venue is ExecutionVenue.kucoin:
             return {"id": str(int(time.time() * 1000)), "type": "subscribe", "topic": self._kucoin_topic(subscription, symbol), "privateChannel": subscription.kind in {StreamKind.user_data, StreamKind.balance_updates, StreamKind.order_updates, StreamKind.execution_reports}, "response": True}
+        if venue is ExecutionVenue.coinstore:
+            return {"op": "SUB", "channel": [self._coinstore_channel(subscription, symbol)], "id": int(time.time())}
         return {"op": "subscribe", "channel": subscription.kind.value, "symbol": symbol}
 
     def parse_sequence(self, venue: ExecutionVenue, message: dict[str, Any]) -> tuple[int | None, int | None]:
@@ -171,6 +173,14 @@ class VenueWebSocketCodec:
 
     def _kucoin_topic(self, subscription: StreamSubscription, symbol: str) -> str:
         return {StreamKind.orderbook: f"/market/level2:{symbol}", StreamKind.trades: f"/market/match:{symbol}", StreamKind.ticker: f"/market/ticker:{symbol}", StreamKind.kline: f"/market/candles:{symbol}_{subscription.interval or '1min'}", StreamKind.order_updates: "/spotMarket/tradeOrders", StreamKind.balance_updates: "/account/balance", StreamKind.execution_reports: "/spotMarket/tradeOrders"}[subscription.kind]
+
+    def _coinstore_channel(self, subscription: StreamSubscription, symbol: str) -> str:
+        return {
+            StreamKind.orderbook: f"{symbol}@depth",
+            StreamKind.trades: f"{symbol}@trade",
+            StreamKind.ticker: f"{symbol}@ticker",
+            StreamKind.kline: f"{symbol}@kline_{subscription.interval or '1m'}",
+        }.get(subscription.kind, f"{symbol}@{subscription.kind.value}")
 
 
 class VenueWebSocketConnector:
