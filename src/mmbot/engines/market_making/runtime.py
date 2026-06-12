@@ -128,7 +128,14 @@ class MarketMakerRuntime:
         }
 
     async def _kill_switch_active(self) -> bool:
-        state = await self.bus.cache.get_json("risk:kill_switch")
+        try:
+            state = await self.bus.cache.get_json("risk:kill_switch")
+        except Exception as exc:
+            reason = "kill_switch_state_unavailable"
+            self.metrics.increment("risk.kill_switch_read_failures")
+            self.canary.activate_shutdown(reason)
+            logger.critical("kill_switch_read_failed", extra={"reason": reason, "error": str(exc), "mode": self.mode.value})
+            return True
         if isinstance(state, dict) and state.get("active"):
             reason = str(state.get("reason") or "kill_switch_active")
             self.canary.activate_shutdown(reason)
@@ -140,9 +147,17 @@ class MarketMakerRuntime:
         for exchange in self.settings.MARKET_DATA_EXCHANGES:
             for symbol in self.settings.MARKET_DATA_SYMBOLS:
                 for kind in ("ticker", "orderbook", "analytics"):
-                    payload = await self.bus.cache.get_json(f"latest:marketdata:{kind}:{exchange}:{symbol}")
+                    payload = await self._optional_cache_get_json(f"latest:marketdata:{kind}:{exchange}:{symbol}")
                     if isinstance(payload, dict):
                         await self.ingest_market_event(f"marketdata:{kind}:{exchange}:{symbol}", payload)
+
+    async def _optional_cache_get_json(self, key: str) -> Any | None:
+        try:
+            return await self.bus.cache.get_json(key)
+        except Exception as exc:
+            self.metrics.increment("runtime.cache_read_misses")
+            logger.debug("runtime_cache_read_ignored", extra={"key": key, "error": str(exc)})
+            return None
 
     async def _consume_bus_events(self) -> None:
         if self.pubsub is None:
