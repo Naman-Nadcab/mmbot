@@ -86,7 +86,12 @@ def _sign_bitmart(path: str, params: dict[str, Any], body: dict[str, Any] | None
 
 def _sign_coinstore(method: str, path: str, params: dict[str, Any], body: dict[str, Any] | None, credentials: ExecutionCredentials) -> SignedRequest:
     timestamp = str(int(time.time() * 1000))
-    payload = json.dumps(body or params or {}, separators=(",", ":"), sort_keys=True)
-    message = f"{timestamp}{method.upper()}{path}{payload}"
-    signature = hmac.new(credentials.api_secret.encode(), message.encode(), hashlib.sha256).hexdigest()
-    return SignedRequest(path, params, body, {"X-CS-APIKEY": credentials.api_key, "X-CS-TIMESTAMP": timestamp, "X-CS-SIGN": signature})
+    payload = json.dumps(body or params or {}, separators=(",", ":"))
+    signature = coinstore_signature(credentials.api_secret, timestamp, payload)
+    return SignedRequest(path, params, body, {"X-CS-APIKEY": credentials.api_key, "X-CS-EXPIRES": timestamp, "X-CS-SIGN": signature})
+
+
+def coinstore_signature(api_secret: str, expires: str | int, payload: str) -> str:
+    time_slot = str(int(int(expires) / 30000))
+    key = hmac.new(api_secret.encode(), time_slot.encode(), hashlib.sha256).digest()
+    return hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()

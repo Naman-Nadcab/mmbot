@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import time
@@ -12,7 +10,7 @@ from typing import Any
 import websockets
 
 from mmbot.core.config import Settings
-from mmbot.execution.signing import ExecutionCredentials
+from mmbot.execution.signing import ExecutionCredentials, coinstore_signature
 from mmbot.exchanges.registry import get_exchange_definition
 
 logger = logging.getLogger(__name__)
@@ -98,4 +96,4 @@ class CoinstorePrivateWebSocketClient:
 
     def _signature(self, expires: int) -> str:
         payload = str(expires)
-        return hmac.new(self.credentials.api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        return coinstore_signature(self.credentials.api_secret, expires, payload)

@@ -479,6 +479,19 @@ class MarketMakerRuntime:
         if (now - self.last_reconciliation_at).total_seconds() < self.settings.RECONCILIATION_INTERVAL_SECONDS:
             return
         self.last_reconciliation_at = now
+        if self.mode in {LaunchMode.canary, LaunchMode.live}:
+            service = await self._coinstore()
+            report = await service.reconcile_live(self.settings.MARKET_DATA_SYMBOLS)
+            self.metrics.increment("reconciliation.runs")
+            self.metrics.increment("reconciliation.mismatches", len(report.mismatches))
+            self.metrics.increment("coinstore.reconciliation.stale_orders", len(report.stale_order_ids))
+            self.metrics.increment("coinstore.reconciliation.orphan_orders", len(report.orphan_order_ids))
+            logger.info("coinstore_reconciliation_completed", extra={"mismatch_count": len(report.mismatches), "stale_orders": len(report.stale_order_ids), "orphan_orders": len(report.orphan_order_ids), "mode": self.mode.value})
+            if report.mismatches:
+                self.session.add(models.RiskEvent(severity=models.RiskSeverity.high, event_type="COINSTORE_RECONCILIATION_MISMATCH", source_component="market-maker-engine", message=f"{len(report.mismatches)} Coinstore reconciliation mismatches", metadata_json={"mismatches": [mismatch.__dict__ for mismatch in report.mismatches]}))
+                await self.session.flush()
+                self._handle_reconciliation_mismatches(len(report.mismatches))
+            return
         snapshot = self.paper.reconciliation_snapshot()
         mismatches = self.reconciliation_engine.reconcile(snapshot, snapshot)
         self.metrics.increment("reconciliation.runs")

@@ -28,6 +28,8 @@ class VenueExecutionSpec:
     order_replace_path: str | None = None
     bulk_order_path: str | None = None
     bulk_cancel_path: str | None = None
+    open_orders_path: str | None = None
+    account_trades_path: str | None = None
     symbol_separator: str = ""
 
 
@@ -37,5 +39,5 @@ EXECUTION_SPECS: dict[ExecutionVenue, VenueExecutionSpec] = {
     ExecutionVenue.gate: VenueExecutionSpec(ExecutionVenue.gate, SigningStyle.gate_v4, "/spot/orders", "/spot/orders/{order_id}", "/spot/orders", "/spot/orders/{order_id}", "/spot/accounts", "/spot/currency_pairs", symbol_separator="_"),
     ExecutionVenue.bitmart: VenueExecutionSpec(ExecutionVenue.bitmart, SigningStyle.bitmart_v2, "/spot/v2/submit_order", "/spot/v3/cancel_order", "/spot/v1/cancel_orders", "/spot/v1/order_detail", "/spot/v1/wallet", "/spot/v1/symbols/details", "/spot/v1/cancel_order"),
     ExecutionVenue.kucoin: VenueExecutionSpec(ExecutionVenue.kucoin, SigningStyle.kucoin_v2, "/api/v1/orders", "/api/v1/orders/{order_id}", "/api/v1/orders", "/api/v1/orders/{order_id}", "/api/v1/accounts", "/api/v2/symbols", symbol_separator="-"),
-    ExecutionVenue.coinstore: VenueExecutionSpec(ExecutionVenue.coinstore, SigningStyle.coinstore_hmac, "/api/trade/order/place", "/api/trade/order/cancel", "/api/trade/order/cancelAll", "/api/trade/order/orderInfo", "/api/spot/accountList", "/api/v1/market/tickers", symbol_separator=""),
+    ExecutionVenue.coinstore: VenueExecutionSpec(ExecutionVenue.coinstore, SigningStyle.coinstore_hmac, "/api/trade/order/place", "/api/trade/order/cancel", "/api/trade/order/cancelAll", "/api/trade/order/orderInfo", "/api/spot/accountList", "/api/v1/market/tickers", open_orders_path="/api/trade/order/active", account_trades_path="/api/trade/match/accountMatches", symbol_separator=""),
 }

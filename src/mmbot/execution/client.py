@@ -11,7 +11,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from mmbot.core.config import Settings
 from mmbot.core.exceptions import ExchangeError, RateLimitExceededError
 from mmbot.execution.errors import normalize_exchange_error, raise_normalized_error
-from mmbot.execution.models import Balance, BulkExecutionResult, CancelIntent, ExecutionOrder, ExecutionOrderType, ExecutionSide, ExecutionVenue, OrderIntent, Position, ReplaceIntent, SymbolPrecision, TimeInForce
+from mmbot.execution.models import Balance, BulkExecutionResult, CancelIntent, ExecutionOrder, ExecutionOrderType, ExecutionSide, ExecutionVenue, NormalizedOrderStatus, OrderIntent, Position, ReplaceIntent, SymbolPrecision, TimeInForce
 from mmbot.execution.precision import apply_symbol_precision, decimal_to_exchange
 from mmbot.execution.signing import ExecutionCredentials, sign_request
 from mmbot.execution.specs import EXECUTION_SPECS, VenueExecutionSpec
@@ -95,6 +95,20 @@ class PrivateRestExecutionClient:
         data = await self._signed_request("GET", path, params=self._cancel_payload(intent), body=None)
         return self._parse_order(data, None)
 
+    async def sync_open_orders(self, symbol: str | None = None) -> list[ExecutionOrder]:
+        if self.spec.open_orders_path is None:
+            raise ExchangeError(f"{self.venue.value} does not define open-orders endpoint")
+        params = {"symbol": self._venue_symbol(symbol)} if symbol else {}
+        data = await self._signed_request("GET", self.spec.open_orders_path, params=params, body=None)
+        return [self._parse_order(item, None) for item in self._extract_list(data)]
+
+    async def sync_trade_fills(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        if self.spec.account_trades_path is None:
+            raise ExchangeError(f"{self.venue.value} does not define account-trades endpoint")
+        params = {"symbol": self._venue_symbol(symbol)} if symbol else {}
+        data = await self._signed_request("GET", self.spec.account_trades_path, params=params, body=None)
+        return [item for item in self._extract_list(data) if isinstance(item, dict)]
+
     async def sync_balances(self) -> list[Balance]:
         data = await self._signed_request("GET", self.spec.account_balances_path, params={}, body=None)
         return self._parse_balances(data)
@@ -171,18 +185,20 @@ class PrivateRestExecutionClient:
     def _parse_order(self, data: Any, intent: OrderIntent | None) -> ExecutionOrder:
         raw = self._unwrap(data)
         side_value = raw.get("side") or (intent.side.value if intent else None)
-        type_value = raw.get("type") or raw.get("ordType") or (intent.order_type.value if intent else None)
+        type_value = raw.get("type") or raw.get("ordType") or raw.get("orderType") or (intent.order_type.value if intent else None)
+        side = self._parse_side(side_value)
+        order_type = self._parse_order_type(type_value)
         return ExecutionOrder(
             venue=self.venue,
-            symbol=str(raw.get("symbol") or raw.get("currency_pair") or (intent.symbol if intent else "")),
-            client_order_id=str(raw.get("clientOrderId") or raw.get("client_order_id") or raw.get("clientOid") or raw.get("text") or (intent.client_order_id if intent else "")) or None,
+            symbol=str(raw.get("symbol") or raw.get("currency_pair") or raw.get("currencyPair") or (intent.symbol if intent else "")),
+            client_order_id=str(raw.get("clientOrderId") or raw.get("client_order_id") or raw.get("clientOid") or raw.get("clOrdId") or raw.get("text") or (intent.client_order_id if intent else "")) or None,
             exchange_order_id=str(raw.get("orderId") or raw.get("order_id") or raw.get("id") or raw.get("ordId") or "") or None,
-            status=normalize_status(raw.get("status") or raw.get("state")),
-            side=ExecutionSide(str(side_value).lower()) if side_value and str(side_value).lower() in {"buy", "sell"} else None,
-            order_type=ExecutionOrderType(str(type_value).lower()) if type_value and str(type_value).lower() in {item.value for item in ExecutionOrderType} else None,
-            price=self._decimal(raw.get("price") or (intent.price if intent else None)),
-            quantity=self._decimal(raw.get("origQty") or raw.get("size") or raw.get("amount") or raw.get("ordQty") or (intent.quantity if intent else None)),
-            filled_quantity=self._decimal(raw.get("executedQty") or raw.get("filled_size") or raw.get("filled_amount") or raw.get("cumExecQty") or 0) or Decimal("0"),
+            status=self._parse_status(raw.get("status") or raw.get("state") or raw.get("orderStatus")),
+            side=side,
+            order_type=order_type,
+            price=self._decimal(raw.get("price") or raw.get("orderPrice") or (intent.price if intent else None)),
+            quantity=self._decimal(raw.get("origQty") or raw.get("size") or raw.get("amount") or raw.get("ordQty") or raw.get("orderQty") or raw.get("quantity") or (intent.quantity if intent else None)),
+            filled_quantity=self._decimal(raw.get("executedQty") or raw.get("filled_size") or raw.get("filled_amount") or raw.get("cumExecQty") or raw.get("matchQty") or 0) or Decimal("0"),
             average_price=self._decimal(raw.get("avgPrice") or raw.get("deal_avg_price") or raw.get("average_price")),
             fee=self._decimal(raw.get("fee")),
             raw=raw,
@@ -255,6 +271,45 @@ class PrivateRestExecutionClient:
         if value is None or value == "":
             return None
         return Decimal(str(value))
+
+    def _parse_side(self, value: Any) -> ExecutionSide | None:
+        normalized = str(value).lower()
+        if normalized in {"1", "buy", "bid", "b"}:
+            return ExecutionSide.buy
+        if normalized in {"-1", "sell", "ask", "s"}:
+            return ExecutionSide.sell
+        return None
+
+    def _parse_order_type(self, value: Any) -> ExecutionOrderType | None:
+        normalized = str(value).lower()
+        if normalized in {"1", "limit"}:
+            return ExecutionOrderType.limit
+        if normalized in {"3", "market"}:
+            return ExecutionOrderType.market
+        if normalized in {"post_only", "post-only"}:
+            return ExecutionOrderType.post_only
+        if normalized in {item.value for item in ExecutionOrderType}:
+            return ExecutionOrderType(normalized)
+        return None
+
+    def _parse_status(self, value: Any) -> NormalizedOrderStatus:
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            return normalize_status(value)
+        return {
+            0: NormalizedOrderStatus.new,
+            1: NormalizedOrderStatus.open,
+            2: NormalizedOrderStatus.open,
+            3: NormalizedOrderStatus.partially_filled,
+            4: NormalizedOrderStatus.filled,
+            5: NormalizedOrderStatus.cancelled,
+            6: NormalizedOrderStatus.cancelled,
+            7: NormalizedOrderStatus.open,
+            8: NormalizedOrderStatus.rejected,
+            11: NormalizedOrderStatus.rejected,
+            12: NormalizedOrderStatus.rejected,
+        }.get(numeric, NormalizedOrderStatus.unknown)
 
 
 class ExecutionClientFactory:

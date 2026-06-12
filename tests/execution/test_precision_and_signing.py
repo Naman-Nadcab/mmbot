@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from mmbot.execution.models import ExecutionOrderType, ExecutionSide, ExecutionVenue, OrderIntent, SymbolPrecision
 from mmbot.execution.precision import apply_symbol_precision
-from mmbot.execution.signing import ExecutionCredentials, sign_request
+from mmbot.execution.signing import ExecutionCredentials, coinstore_signature, sign_request
 from mmbot.execution.specs import SigningStyle
 
 
@@ -19,3 +19,12 @@ def test_binance_query_signing_adds_signature_and_key_header():
     assert signed.headers["X-MBX-APIKEY"] == "key"
     assert "signature" in signed.params
     assert "timestamp" in signed.params
+
+
+def test_coinstore_signing_uses_expires_header_and_derived_key():
+    signature = coinstore_signature("secret", "1700000000000", '{"symbol":"BTCUSDT"}')
+    signed = sign_request(SigningStyle.coinstore_hmac, "POST", "/api/trade/order/place", {}, {"symbol": "BTCUSDT"}, ExecutionCredentials("key", "secret"))
+    assert signed.headers["X-CS-APIKEY"] == "key"
+    assert "X-CS-EXPIRES" in signed.headers
+    assert "X-CS-SIGN" in signed.headers
+    assert len(signature) == 64

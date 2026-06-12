@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mmbot.core.config import Settings
 from mmbot.db import models
 from mmbot.execution.client import PrivateRestExecutionClient
+from mmbot.execution.coinstore_reconciliation import CoinstoreLiveReconciler, CoinstoreReconciliationReport
+from mmbot.execution.coinstore_safety import CoinstoreExecutionSafety
+from mmbot.execution.coinstore_validation import CoinstoreValidationLayer
 from mmbot.execution.models import Balance, CancelIntent, ExecutionOrder, ExecutionOrderType, ExecutionSide, ExecutionVenue, NormalizedOrderStatus, OrderIntent, SymbolPrecision
 from mmbot.execution.precision import validate_symbol_precision
 from mmbot.execution.signing import ExecutionCredentials
@@ -25,6 +28,8 @@ class CoinstoreExecutionService:
         self._client: PrivateRestExecutionClient | None = None
         self._account: models.ExchangeAccount | None = None
         self._precision: dict[str, SymbolPrecision] | None = None
+        self.validation = CoinstoreValidationLayer()
+        self.safety = CoinstoreExecutionSafety(session)
 
     async def close(self) -> None:
         if self._client is not None:
@@ -33,16 +38,20 @@ class CoinstoreExecutionService:
     async def place_order(self, intent: OrderIntent) -> ExecutionOrder:
         if intent.venue is not ExecutionVenue.coinstore:
             raise ValueError("CoinstoreExecutionService only accepts coinstore intents")
+        account = await self.account()
         precision = await self.precision_for_symbol(intent.symbol)
-        validate_symbol_precision(intent, precision)
         client = await self.client()
+        self.validation.verify_runtime_ready(client.credentials, precision, intent)
+        await self.safety.assert_order_safe(account.id, intent)
         order = await client.place_order(intent, precision)
+        self.validation.verify_order_response(order.raw)
         await self.persist_order(order, intent)
         return order
 
     async def cancel_order(self, intent: CancelIntent) -> ExecutionOrder:
         client = await self.client()
         order = await client.cancel_order(intent)
+        self.validation.verify_order_response(order.raw)
         await self.persist_order(order, None)
         return order
 
@@ -50,14 +59,37 @@ class CoinstoreExecutionService:
         client = await self.client()
         orders = await client.cancel_all_orders(symbol)
         for order in orders:
+            self.validation.verify_order_response(order.raw)
             await self.persist_order(order, None)
         return orders
 
     async def get_order_status(self, intent: CancelIntent) -> ExecutionOrder:
         client = await self.client()
         order = await client.get_order_status(intent)
+        self.validation.verify_order_response(order.raw)
         await self.persist_order(order, None)
         return order
+
+    async def reconcile_live(self, symbols: list[str]) -> CoinstoreReconciliationReport:
+        client = await self.client()
+        account = await self.account()
+        balances = await client.sync_balances()
+        self.validation.verify_balance_response([balance.raw for balance in balances])
+        orders: list[ExecutionOrder] = []
+        fills: list[dict[str, Any]] = []
+        for symbol in symbols:
+            orders.extend(await client.sync_open_orders(symbol))
+            symbol_fills = await client.sync_trade_fills(symbol)
+            self.validation.verify_trade_response(symbol_fills)
+            fills.extend(symbol_fills)
+        for balance in balances:
+            await self.persist_balance_update(balance)
+        for order in orders:
+            await self.persist_order(order, None)
+        for fill in fills:
+            await self.persist_fill_update(fill)
+        safety_report = await self.safety.detect_stale_and_orphan_orders(account.id, [order.exchange_order_id or "" for order in orders])
+        return await CoinstoreLiveReconciler(self.session).reconcile(account, balances, orders, fills, safety_report.stale_order_ids, safety_report.orphan_order_ids)
 
     async def handle_private_message(self, message: dict[str, Any]) -> dict[str, int]:
         counts = {"orders": 0, "trades": 0, "fills": 0, "balances": 0}
@@ -193,6 +225,7 @@ class CoinstoreExecutionService:
 
     async def persist_fill_update(self, payload: dict[str, Any]) -> models.Trade:
         account = await self.account()
+        await self.safety.assert_fill_safe(str(account.id), payload)
         order = await self.persist_order(self._execution_order_from_payload(payload), None)
         trade_id = str(payload.get("tradeId") or payload.get("trade_id") or payload.get("matchId") or payload.get("match_id") or "")
         if not trade_id:

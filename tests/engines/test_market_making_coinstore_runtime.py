@@ -1,6 +1,6 @@
 import asyncio
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -10,9 +10,11 @@ from mmbot.db.models import Base
 from mmbot.db.session import Database
 from mmbot.engines.market_making.engine import Quote, QuoteEngine
 from mmbot.engines.market_making.runtime import MarketMakerRuntime
+from mmbot.execution.coinstore_reconciliation import CoinstoreReconciliationReport
 from mmbot.execution.models import ExecutionOrder, ExecutionOrderType, ExecutionSide, ExecutionVenue, NormalizedOrderStatus
 from mmbot.exchanges.types import OrderBookLevel, OrderBookSnapshot
 from mmbot.observability.metrics import RuntimeMetrics
+from mmbot.reconciliation.engine import ReconciliationMismatch, ReconciliationSeverity, ReconciliationSnapshot
 
 
 class MemoryBus:
@@ -35,6 +37,15 @@ class RecordingCoinstoreService:
     async def handle_private_message(self, message):
         self.private_messages.append(message)
         return {"orders": 1, "trades": 1, "fills": 1, "balances": 1}
+
+    async def reconcile_live(self, symbols):
+        return CoinstoreReconciliationReport(
+            ReconciliationSnapshot(),
+            ReconciliationSnapshot(),
+            [ReconciliationMismatch("order", "orphan", ReconciliationSeverity.critical, "missing", "missing", "present")],
+            ["stale"],
+            ["orphan"],
+        )
 
 
 class OneShotPrivateWebSocket:
@@ -111,5 +122,28 @@ async def test_canary_runtime_starts_coinstore_private_stream(monkeypatch):
         assert runtime.metrics.counters["coinstore.private_trade_updates"] == 1
         assert runtime.metrics.counters["coinstore.private_fill_updates"] == 1
         assert runtime.metrics.counters["coinstore.private_balance_updates"] == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_canary_runtime_uses_live_coinstore_reconciliation():
+    settings = _settings()
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session = database.session_factory()
+        config = default_runtime_config()
+        runtime = MarketMakerRuntime(settings, session, MemoryBus(), QuoteEngine(config.spread, config.order_size, config.inventory, config.order_layers), RuntimeMetrics(), config)
+        runtime.coinstore = RecordingCoinstoreService()
+        runtime.last_reconciliation_at = datetime.now(timezone.utc) - timedelta(seconds=settings.RECONCILIATION_INTERVAL_SECONDS + 1)
+
+        await runtime._maybe_reconcile()
+
+        assert runtime.metrics.counters["reconciliation.runs"] == 1
+        assert runtime.metrics.counters["reconciliation.mismatches"] == 1
+        assert runtime.metrics.counters["coinstore.reconciliation.stale_orders"] == 1
+        assert runtime.metrics.counters["coinstore.reconciliation.orphan_orders"] == 1
     finally:
         await database.close()

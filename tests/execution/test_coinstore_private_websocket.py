@@ -9,6 +9,7 @@ from mmbot.db import models
 from mmbot.db.models import Base
 from mmbot.db.session import Database
 from mmbot.execution.coinstore import CoinstoreExecutionService
+from mmbot.execution.coinstore_safety import CoinstoreSafetyError
 from mmbot.execution.coinstore_ws import CoinstorePrivateWebSocketClient
 from mmbot.execution.signing import ExecutionCredentials
 from mmbot.security.secrets import SecretCipher
@@ -79,5 +80,23 @@ async def test_coinstore_private_messages_persist_order_fill_and_balance_updates
             assert order.status == models.OrderStatus.partially_filled
             assert abs(trade.quantity - Decimal("0.050")) < Decimal("0.00000001")
             assert inventory.total_balance == Decimal("1000")
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_coinstore_private_fill_rejects_wash_trade_signal():
+    settings = _settings()
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with database.session() as session:
+            await _seed(session, settings)
+            service = CoinstoreExecutionService(settings, session)
+            account = await service.account()
+
+            with pytest.raises(CoinstoreSafetyError, match="wash_trade_detected"):
+                await service.persist_fill_update({"symbol": "BTCUSDT", "orderId": "o-1", "clientOrderId": "cid-1", "price": "100.00", "quantity": "0.100", "side": 1, "orderType": 1, "orderStatus": 4, "matchQty": "0.100", "tradeId": "wash-1", "counterpartyAccountId": str(account.id)})
     finally:
         await database.close()
