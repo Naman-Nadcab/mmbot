@@ -17,6 +17,7 @@ from mmbot.engines.inventory.engine import AssetBalance, InventoryEngine
 from mmbot.engines.market_making.engine import InventoryState, MarketState, Quote, QuoteEngine
 from mmbot.engines.risk.engine import OrderIntent as RiskOrderIntent, RiskEngine
 from mmbot.engines.volume.engine import VolumeEngine, VolumeProgressReport
+from mmbot.execution.coinstore import CoinstoreExecutionService
 from mmbot.execution.models import ExecutionOrderType, ExecutionSide, ExecutionVenue, OrderIntent, TimeInForce
 from mmbot.execution.paper import PaperExecutionEngine
 from mmbot.exchanges.types import OrderBookLevel, OrderBookSnapshot
@@ -42,6 +43,7 @@ class MarketMakerRuntime:
         self.volume_engine = VolumeEngine(self.runtime_config.volume)
         self.reconciliation_engine = ReconciliationEngine()
         self.paper = PaperExecutionEngine(session, Decimal(str(settings.PAPER_STARTING_CASH)), settings.PAPER_BASE_ASSET, settings.PAPER_QUOTE_ASSET)
+        self.coinstore: CoinstoreExecutionService | None = None
         self.mode = LaunchMode(settings.TRADING_MODE)
         self.canary = CanaryController(
             CanaryPolicy(
@@ -87,6 +89,8 @@ class MarketMakerRuntime:
             await asyncio.gather(self.consumer_task, return_exceptions=True)
         if self.pubsub is not None:
             await self.pubsub.aclose()
+        if self.coinstore is not None:
+            await self.coinstore.close()
 
     async def tick(self) -> None:
         await self.ensure_started()
@@ -221,17 +225,17 @@ class MarketMakerRuntime:
             self.trading_enabled = False
             self.quoting_enabled = False
             self.risk_engine.activate_kill_switch(str(payload.get("reason") or command.lower()))
-            await self._cancel_all_paper_orders()
+            await self._cancel_all_orders()
         elif command == "ENABLE_TRADING":
             if not await self._kill_switch_active():
                 self.trading_enabled = True
                 self.quoting_enabled = True
         elif command == "CANCEL_ALL_ORDERS":
-            await self._cancel_all_paper_orders()
+            await self._cancel_all_orders()
         elif command == "CLOSE_POSITIONS":
             await self._close_paper_positions()
         elif command == "RUNTIME_RESTART":
-            await self._cancel_all_paper_orders()
+            await self._cancel_all_orders()
             self.latest_ticker.clear()
             self.latest_orderbook.clear()
             self.latest_analytics.clear()
@@ -241,7 +245,7 @@ class MarketMakerRuntime:
                 self.trading_enabled = False
                 self.quoting_enabled = False
                 if action == "stop":
-                    await self._cancel_all_paper_orders()
+                    await self._cancel_all_orders()
             elif action in {"start", "resume"} and not await self._kill_switch_active():
                 self.trading_enabled = True
                 self.quoting_enabled = True
@@ -296,8 +300,9 @@ class MarketMakerRuntime:
             return
         for quote in quotes:
             side = ExecutionSide.buy if quote.side == "buy" else ExecutionSide.sell
+            venue = ExecutionVenue.coinstore if self.mode in {LaunchMode.canary, LaunchMode.live} else ExecutionVenue.binance
             intent = OrderIntent(
-                venue=ExecutionVenue.binance,
+                venue=venue,
                 symbol=symbol,
                 side=side,
                 order_type=ExecutionOrderType.limit,
@@ -321,10 +326,11 @@ class MarketMakerRuntime:
                 if not decision.accepted:
                     self.metrics.increment("market_maker.quote_rejections")
                     continue
-                if self.mode in {LaunchMode.paper, LaunchMode.shadow}:
-                    if self.mode is LaunchMode.paper:
-                        await self.paper.place_order(intent, orderbook)
-                        self.metrics.increment("paper.orders_created")
+                if self.mode is LaunchMode.paper:
+                    await self.paper.place_order(intent, orderbook)
+                    self.metrics.increment("paper.orders_created")
+                elif decision.execution_allowed:
+                    await self._place_live_order(intent)
                 else:
                     self.metrics.increment("market_maker.quote_rejections")
             except Exception as exc:
@@ -391,10 +397,26 @@ class MarketMakerRuntime:
             adjusted.append(Quote(quote.side, round(price, 8), quantity, quote.level, quote.client_order_id))
         return adjusted
 
-    async def _cancel_all_paper_orders(self) -> None:
+    async def _place_live_order(self, intent: OrderIntent) -> None:
+        service = await self._coinstore()
+        order = await service.place_order(intent)
+        self.metrics.increment("coinstore.orders_created")
+        logger.info("coinstore_order_submitted", extra={"symbol": intent.symbol, "client_order_id": order.client_order_id, "exchange_order_id": order.exchange_order_id, "status": order.status.value})
+
+    async def _cancel_all_orders(self) -> None:
         for client_order_id in list(self.paper.open_orders):
             await self.paper.cancel_order(client_order_id)
+        if self.mode in {LaunchMode.canary, LaunchMode.live}:
+            service = await self._coinstore()
+            for symbol in self.settings.MARKET_DATA_SYMBOLS:
+                cancelled = await service.cancel_all_orders(symbol)
+                self.metrics.increment("coinstore.orders_cancelled", len(cancelled))
         self.metrics.increment("runtime.cancel_all_orders")
+
+    async def _coinstore(self) -> CoinstoreExecutionService:
+        if self.coinstore is None:
+            self.coinstore = CoinstoreExecutionService(self.settings, self.session)
+        return self.coinstore
 
     async def _close_paper_positions(self) -> None:
         if not self.latest_orderbook:

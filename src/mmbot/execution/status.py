@@ -17,6 +17,15 @@ STATUS_MAP = {
     "done": NormalizedOrderStatus.filled,
     "active": NormalizedOrderStatus.open,
     "success": NormalizedOrderStatus.open,
+    "SUBMITTED": NormalizedOrderStatus.open,
+    "PENDING": NormalizedOrderStatus.open,
+    "PARTIAL_FILLED": NormalizedOrderStatus.partially_filled,
+    "PARTIAL_CANCELED": NormalizedOrderStatus.cancelled,
+    "PARTIAL_CANCELLED": NormalizedOrderStatus.cancelled,
+    "CANCELING": NormalizedOrderStatus.open,
+    "CANCELLING": NormalizedOrderStatus.open,
+    "COMPLETE": NormalizedOrderStatus.filled,
+    "COMPLETED": NormalizedOrderStatus.filled,
 }
 
 

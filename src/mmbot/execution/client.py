@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 class PrivateRestExecutionClient:
-    def __init__(self, venue: ExecutionVenue, settings: Settings):
+    def __init__(self, venue: ExecutionVenue, settings: Settings, credentials: ExecutionCredentials | None = None):
         self.venue = venue
         self.spec: VenueExecutionSpec = EXECUTION_SPECS[venue]
         self.definition = get_exchange_definition(venue.value)
-        self.credentials = ExecutionCredentials(
+        self.credentials = credentials or ExecutionCredentials(
             api_key=settings.EXCHANGE_API_KEYS[venue.value],
             api_secret=settings.EXCHANGE_API_SECRETS[venue.value],
             passphrase=settings.EXCHANGE_API_PASSPHRASES.get(venue.value),
