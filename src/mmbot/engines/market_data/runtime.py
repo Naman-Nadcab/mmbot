@@ -129,6 +129,9 @@ class MarketDataRuntime:
         self.tasks: list[asyncio.Task[None]] = []
         self.command_task: asyncio.Task[None] | None = None
         self.pubsub: Any | None = None
+        self.websocket_messages_received = 0
+        self.last_websocket_message_at: datetime | None = None
+        self.last_websocket_message_by_venue: dict[str, datetime] = {}
         self.last_message_at: dict[str, datetime] = {}
         self.active_subscriptions = 0
         self.reconnect_count = 0
@@ -189,6 +192,9 @@ class MarketDataRuntime:
     def health(self) -> dict[str, object]:
         return {
             "active_subscriptions": self.active_subscriptions,
+            "websocket_messages_received": self.websocket_messages_received,
+            "last_websocket_message_timestamp": self.last_websocket_message_at.isoformat() if self.last_websocket_message_at else None,
+            "last_websocket_message_by_venue": {key: value.isoformat() for key, value in self.last_websocket_message_by_venue.items()},
             "last_message_timestamp": {key: value.isoformat() for key, value in self.last_message_at.items()},
             "reconnect_count": self.reconnect_count,
             "sequence_gaps": self.sequence_gaps,
@@ -256,12 +262,11 @@ class MarketDataRuntime:
         failed_tasks = [task.get_name() for task in self.tasks if task.done()]
         if failed_tasks:
             raise RuntimeError(f"market data connector tasks stopped: {failed_tasks}")
-        if not any(connector.connected for connector in self.connectors):
+        connector_task_running = any(not task.done() for task in self.tasks)
+        if not any(connector.connected for connector in self.connectors) and not (connector_task_running and self.websocket_messages_received > 0):
             raise RuntimeError("market data has no active websocket connections")
-        if not self.last_message_at:
+        if self.websocket_messages_received <= 0:
             raise RuntimeError("market data has not received any websocket messages")
-        if self.redis_publish_count <= 0:
-            raise RuntimeError("market data has not published any Redis market data")
 
     def _subscriptions(self, venue: ExecutionVenue) -> list[StreamSubscription]:
         subscriptions: list[StreamSubscription] = []
@@ -272,6 +277,7 @@ class MarketDataRuntime:
 
     async def _run_connector(self, connector: VenueWebSocketConnector, subscriptions: list[StreamSubscription]) -> None:
         async def handler(message: dict[str, Any]) -> None:
+            self._record_websocket_message(connector.venue)
             for subscription in subscriptions:
                 await self._handle_message(subscription.venue, subscription.symbol or "", message)
 
@@ -285,6 +291,13 @@ class MarketDataRuntime:
                 self.metrics.increment("market_data.reconnect_count")
                 logger.warning("market_data_connector_restart", extra={"venue": connector.venue.value, "error": str(exc), "reconnect_count": self.reconnect_count})
                 await asyncio.sleep(min(30, max(1, self.reconnect_count)))
+
+    def _record_websocket_message(self, venue: ExecutionVenue) -> None:
+        now = datetime.now(timezone.utc)
+        self.websocket_messages_received += 1
+        self.last_websocket_message_at = now
+        self.last_websocket_message_by_venue[venue.value] = now
+        self.metrics.increment("market_data.websocket_messages_received")
 
     async def _handle_message(self, venue: ExecutionVenue, symbol: str, message: dict[str, Any]) -> None:
         normalized = self.normalizer.normalize(venue, symbol, message)
