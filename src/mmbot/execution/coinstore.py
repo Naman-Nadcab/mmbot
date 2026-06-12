@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mmbot.core.config import Settings
 from mmbot.db import models
 from mmbot.execution.client import PrivateRestExecutionClient
-from mmbot.execution.models import CancelIntent, ExecutionOrder, ExecutionVenue, NormalizedOrderStatus, OrderIntent, SymbolPrecision
+from mmbot.execution.models import Balance, CancelIntent, ExecutionOrder, ExecutionOrderType, ExecutionSide, ExecutionVenue, NormalizedOrderStatus, OrderIntent, SymbolPrecision
 from mmbot.execution.precision import validate_symbol_precision
 from mmbot.execution.signing import ExecutionCredentials
+from mmbot.execution.status import normalize_status
 from mmbot.security.secrets import SecretCipher
 
 
@@ -55,6 +58,21 @@ class CoinstoreExecutionService:
         order = await client.get_order_status(intent)
         await self.persist_order(order, None)
         return order
+
+    async def handle_private_message(self, message: dict[str, Any]) -> dict[str, int]:
+        counts = {"orders": 0, "trades": 0, "fills": 0, "balances": 0}
+        for payload in self._private_payloads(message):
+            if self._is_balance_payload(payload):
+                await self.persist_balance_update(self._balance_from_payload(payload))
+                counts["balances"] += 1
+            if self._is_order_payload(payload):
+                await self.persist_order(self._execution_order_from_payload(payload), None)
+                counts["orders"] += 1
+            if self._is_fill_payload(payload):
+                await self.persist_fill_update(payload)
+                counts["trades"] += 1
+                counts["fills"] += 1
+        return counts
 
     async def client(self) -> PrivateRestExecutionClient:
         if self._client is not None:
@@ -155,13 +173,64 @@ class CoinstoreExecutionService:
         await self.session.flush()
         return row
 
+    async def persist_balance_update(self, balance: Balance) -> models.InventorySnapshot:
+        account = await self.account()
+        row = models.InventorySnapshot(
+            exchange_account_id=account.id,
+            asset=balance.asset,
+            total_balance=balance.total,
+            available_balance=balance.available,
+            reserved_balance=balance.reserved,
+            valuation_asset="USDT",
+            valuation_price=None,
+            valuation_amount=None,
+            captured_at=datetime.now(timezone.utc),
+            metadata_json={"source": "coinstore_private_websocket", "raw": balance.raw},
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def persist_fill_update(self, payload: dict[str, Any]) -> models.Trade:
+        account = await self.account()
+        order = await self.persist_order(self._execution_order_from_payload(payload), None)
+        trade_id = str(payload.get("tradeId") or payload.get("trade_id") or payload.get("matchId") or payload.get("match_id") or "")
+        if not trade_id:
+            raise RuntimeError("Coinstore fill update is missing tradeId/matchId")
+        result = await self.session.execute(select(models.Trade).where(models.Trade.exchange_account_id == account.id, models.Trade.exchange_trade_id == trade_id))
+        row = result.scalar_one_or_none()
+        if row is not None:
+            return row
+        price = self._decimal(payload.get("price") or payload.get("avgPrice") or payload.get("orderPrice") or 0)
+        quantity = self._decimal(payload.get("execQty") or payload.get("matchQty") or payload.get("quantity") or payload.get("filledQty") or 0)
+        fee = self._decimal(payload.get("fee") or 0)
+        side_raw = _side(payload.get("side")) or order.side
+        side = models.OrderSide(side_raw.value if hasattr(side_raw, "value") else str(side_raw))
+        traded_at = _timestamp(payload.get("matchTime") or payload.get("time") or payload.get("ts"))
+        row = models.Trade(
+            order_id=order.id,
+            exchange_trade_id=trade_id,
+            exchange_account_id=account.id,
+            trading_pair_id=order.trading_pair_id,
+            side=side,
+            price=price,
+            quantity=quantity,
+            fee_amount=fee,
+            fee_asset=str(payload.get("feeAsset") or payload.get("feeCurrency") or ""),
+            traded_at=traded_at,
+            metadata_json={"source": "coinstore_private_websocket", "raw": payload},
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
     async def _trading_pair(self, symbol: str) -> models.TradingPair:
         normalized = symbol.upper().replace("-", "/").replace("_", "/")
         compact = normalized.replace("/", "")
         result = await self.session.execute(
             select(models.TradingPair).where(
                 models.TradingPair.exchange_name == "coinstore",
-                (models.TradingPair.normalized_symbol == normalized) | (models.TradingPair.venue_symbol == compact),
+                or_(models.TradingPair.normalized_symbol == normalized, models.TradingPair.venue_symbol == compact),
             )
         )
         row = result.scalar_one_or_none()
@@ -175,7 +244,7 @@ class CoinstoreExecutionService:
         result = await self.session.execute(
             select(models.TradingPair).where(
                 models.TradingPair.exchange_name == "coinstore",
-                (models.TradingPair.normalized_symbol == normalized) | (models.TradingPair.venue_symbol == compact),
+                or_(models.TradingPair.normalized_symbol == normalized, models.TradingPair.venue_symbol == compact),
             )
         )
         row = result.scalar_one_or_none()
@@ -203,6 +272,81 @@ class CoinstoreExecutionService:
         await self.session.flush()
         return row
 
+    def _private_payloads(self, message: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates: list[Any] = [message]
+        for key in ("body", "data", "result", "payload"):
+            value = message.get(key)
+            if value is not None:
+                candidates.append(value)
+        payloads: list[dict[str, Any]] = []
+        while candidates:
+            item = candidates.pop(0)
+            if isinstance(item, list):
+                candidates.extend(item)
+            elif isinstance(item, dict):
+                nested = item.get("data") or item.get("items") or item.get("orders") or item.get("matches") or item.get("balances")
+                if isinstance(nested, list):
+                    candidates.extend(nested)
+                else:
+                    payloads.append(item)
+        return payloads
+
+    def _is_balance_payload(self, payload: dict[str, Any]) -> bool:
+        return _int(payload.get("messageType")) == 3002 or any(key in payload for key in ("totalBalance", "available", "availableBalance", "frozenInitMargin"))
+
+    def _is_order_payload(self, payload: dict[str, Any]) -> bool:
+        return _int(payload.get("messageType")) == 3004 or any(key in payload for key in ("orderId", "clientOrderId", "clOrdId", "orderStatus"))
+
+    def _is_fill_payload(self, payload: dict[str, Any]) -> bool:
+        return any(key in payload for key in ("tradeId", "trade_id", "matchId", "match_id")) and any(key in payload for key in ("execQty", "matchQty", "filledQty"))
+
+    def _balance_from_payload(self, payload: dict[str, Any]) -> Balance:
+        asset = str(payload.get("asset") or payload.get("currency") or payload.get("coin") or payload.get("currencyId") or "").upper()
+        if not asset:
+            raise RuntimeError("Coinstore balance update is missing asset/currency")
+        available = self._decimal(payload.get("available") or payload.get("availableBalance") or 0)
+        total = self._decimal(payload.get("totalBalance") or payload.get("total") or payload.get("balance") or available)
+        reserved = self._decimal(payload.get("reserved") or payload.get("locked") or payload.get("frozenInitMargin") or max(Decimal("0"), total - available))
+        return Balance(ExecutionVenue.coinstore, asset, total, available, reserved, payload)
+
+    def _execution_order_from_payload(self, payload: dict[str, Any]) -> ExecutionOrder:
+        symbol = self._symbol_from_payload(payload)
+        side = _side(payload.get("side"))
+        order_type = _order_type(payload.get("orderType") or payload.get("ordType") or payload.get("type"))
+        quantity = self._decimal(payload.get("quantity") or payload.get("orderQty") or payload.get("ordQty") or payload.get("execQty") or payload.get("matchQty") or 0)
+        filled = self._decimal(payload.get("matchQty") or payload.get("execQty") or payload.get("filledQty") or 0)
+        price = self._decimal(payload.get("price") or payload.get("orderPrice") or payload.get("avgPrice") or 0)
+        status = _coinstore_order_status(payload.get("orderStatus") or payload.get("status") or payload.get("state"))
+        return ExecutionOrder(
+            venue=ExecutionVenue.coinstore,
+            symbol=symbol,
+            client_order_id=str(payload.get("clientOrderId") or payload.get("clOrdId") or payload.get("client_order_id") or "") or None,
+            exchange_order_id=str(payload.get("orderId") or payload.get("order_id") or payload.get("ordId") or "") or None,
+            status=status,
+            side=side,
+            order_type=order_type,
+            price=price if price > 0 else None,
+            quantity=quantity,
+            filled_quantity=filled,
+            average_price=self._decimal(payload.get("avgPrice") or payload.get("averagePrice")) or None,
+            fee=self._decimal(payload.get("fee") or 0),
+            raw=payload,
+        )
+
+    def _symbol_from_payload(self, payload: dict[str, Any]) -> str:
+        raw = payload.get("symbol") or payload.get("currencyPair") or payload.get("instrumentId") or payload.get("contractId")
+        if raw is None:
+            raise RuntimeError("Coinstore private update is missing symbol/instrument")
+        value = str(raw).upper().replace("-", "/").replace("_", "/")
+        if "/" in value:
+            return value
+        return value
+
+    def _decimal(self, value: Any) -> Decimal:
+        if value is None or value == "":
+            return Decimal("0")
+        return Decimal(str(value))
+
 
 def _order_status(status: NormalizedOrderStatus) -> models.OrderStatus:
     return {
@@ -215,3 +359,58 @@ def _order_status(status: NormalizedOrderStatus) -> models.OrderStatus:
         NormalizedOrderStatus.expired: models.OrderStatus.expired,
         NormalizedOrderStatus.unknown: models.OrderStatus.submitted,
     }[status]
+
+
+def _coinstore_order_status(value: Any) -> NormalizedOrderStatus:
+    numeric = _int(value)
+    if numeric is not None:
+        return {
+            0: NormalizedOrderStatus.new,
+            1: NormalizedOrderStatus.open,
+            2: NormalizedOrderStatus.open,
+            3: NormalizedOrderStatus.partially_filled,
+            4: NormalizedOrderStatus.filled,
+            5: NormalizedOrderStatus.cancelled,
+            6: NormalizedOrderStatus.cancelled,
+            7: NormalizedOrderStatus.open,
+            8: NormalizedOrderStatus.rejected,
+            11: NormalizedOrderStatus.rejected,
+            12: NormalizedOrderStatus.rejected,
+        }.get(numeric, NormalizedOrderStatus.unknown)
+    return normalize_status(value)
+
+
+def _side(value: Any) -> models.OrderSide | ExecutionSide | None:
+    normalized = str(value).lower()
+    if normalized in {"1", "buy", "bid", "b"}:
+        return ExecutionSide.buy
+    if normalized in {"-1", "sell", "ask", "s"}:
+        return ExecutionSide.sell
+    return None
+
+
+def _order_type(value: Any) -> ExecutionOrderType | None:
+    normalized = str(value).lower()
+    if normalized in {"1", "limit"}:
+        return ExecutionOrderType.limit
+    if normalized in {"3", "market"}:
+        return ExecutionOrderType.market
+    if normalized in {"post_only", "post-only"}:
+        return ExecutionOrderType.post_only
+    return None
+
+
+def _timestamp(value: Any) -> datetime:
+    if value is None or value == "":
+        return datetime.now(timezone.utc)
+    number = float(value)
+    if number > 10_000_000_000:
+        number /= 1000
+    return datetime.fromtimestamp(number, tz=timezone.utc)
+
+
+def _int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

@@ -18,6 +18,7 @@ from mmbot.engines.market_making.engine import InventoryState, MarketState, Quot
 from mmbot.engines.risk.engine import OrderIntent as RiskOrderIntent, RiskEngine
 from mmbot.engines.volume.engine import VolumeEngine, VolumeProgressReport
 from mmbot.execution.coinstore import CoinstoreExecutionService
+from mmbot.execution.coinstore_ws import CoinstorePrivateWebSocketClient
 from mmbot.execution.models import ExecutionOrderType, ExecutionSide, ExecutionVenue, OrderIntent, TimeInForce
 from mmbot.execution.paper import PaperExecutionEngine
 from mmbot.exchanges.types import OrderBookLevel, OrderBookSnapshot
@@ -44,6 +45,8 @@ class MarketMakerRuntime:
         self.reconciliation_engine = ReconciliationEngine()
         self.paper = PaperExecutionEngine(session, Decimal(str(settings.PAPER_STARTING_CASH)), settings.PAPER_BASE_ASSET, settings.PAPER_QUOTE_ASSET)
         self.coinstore: CoinstoreExecutionService | None = None
+        self.coinstore_private_ws: CoinstorePrivateWebSocketClient | None = None
+        self.coinstore_private_task: asyncio.Task[None] | None = None
         self.mode = LaunchMode(settings.TRADING_MODE)
         self.canary = CanaryController(
             CanaryPolicy(
@@ -81,6 +84,8 @@ class MarketMakerRuntime:
         ]
         await self.pubsub.psubscribe(*patterns)
         self.consumer_task = asyncio.create_task(self._consume_bus_events(), name="market-maker-bus-consumer")
+        if self.mode in {LaunchMode.canary, LaunchMode.live}:
+            await self._start_coinstore_private_stream()
         logger.info("market_maker_runtime_started", extra={"mode": self.mode.value, "patterns": patterns})
 
     async def stop(self) -> None:
@@ -89,6 +94,11 @@ class MarketMakerRuntime:
             await asyncio.gather(self.consumer_task, return_exceptions=True)
         if self.pubsub is not None:
             await self.pubsub.aclose()
+        if self.coinstore_private_ws is not None:
+            self.coinstore_private_ws.stop()
+        if self.coinstore_private_task is not None:
+            self.coinstore_private_task.cancel()
+            await asyncio.gather(self.coinstore_private_task, return_exceptions=True)
         if self.coinstore is not None:
             await self.coinstore.close()
 
@@ -417,6 +427,28 @@ class MarketMakerRuntime:
         if self.coinstore is None:
             self.coinstore = CoinstoreExecutionService(self.settings, self.session)
         return self.coinstore
+
+    async def _start_coinstore_private_stream(self) -> None:
+        if self.coinstore_private_task is not None:
+            return
+        service = await self._coinstore()
+        rest_client = await service.client()
+        self.coinstore_private_ws = CoinstorePrivateWebSocketClient(self.settings, rest_client.credentials)
+        self.coinstore_private_task = asyncio.create_task(self._run_coinstore_private_stream(), name="coinstore-private-websocket")
+
+    async def _run_coinstore_private_stream(self) -> None:
+        if self.coinstore_private_ws is None:
+            return
+
+        async def handler(message: dict[str, Any]) -> None:
+            service = await self._coinstore()
+            counts = await service.handle_private_message(message)
+            self.metrics.increment("coinstore.private_order_updates", counts["orders"])
+            self.metrics.increment("coinstore.private_trade_updates", counts["trades"])
+            self.metrics.increment("coinstore.private_fill_updates", counts["fills"])
+            self.metrics.increment("coinstore.private_balance_updates", counts["balances"])
+
+        await self.coinstore_private_ws.run(handler)
 
     async def _close_paper_positions(self) -> None:
         if not self.latest_orderbook:
