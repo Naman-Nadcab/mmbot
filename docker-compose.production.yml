@@ -11,6 +11,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SERVER_IP: ${SERVER_IP:-0.0.0.0}
       SERVER_PORT: ${SERVER_PORT:-8000}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      REDIS_URL: redis://redis:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
 
   market-maker-engine:
     <<: *production-env-file
@@ -18,6 +21,9 @@ services:
     environment:
       COMPONENT_NAME: market-maker-engine
       APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      REDIS_URL: redis://redis:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
 
   market-data-engine:
     <<: *production-env-file
@@ -25,6 +31,9 @@ services:
     environment:
       COMPONENT_NAME: market-data-engine
       APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      REDIS_URL: redis://redis:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
 
   dashboard:
     restart: unless-stopped

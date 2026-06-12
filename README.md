@@ -82,7 +82,10 @@ Validate with:
 ```bash
 python3 scripts/validate_env.py --file .env.development
 python3 scripts/validate_env.py --file .env.example --allow-template-values
+python3 scripts/validate_env.py --file .env.production --release-checks --repo-root .
 ```
+
+For production Compose deployments, replace every `CHANGE_ME` value in `.env.production` before running Docker Compose. The production override derives container `DATABASE_URL` and `REDIS_URL` from `POSTGRES_*` and `REDIS_PASSWORD` values so the stack can be recreated from the checked-in compose files.
 
 ## Local Bootstrap Stack
 
