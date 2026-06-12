@@ -177,7 +177,7 @@ class MarketDataNormalizer:
         return any(token in {"ping", "pong", "heartbeat", "resp", "echo", "command.received", "sub.channel.success", "established"} for token in tokens)
 
     def _coinstore_payload(self, message: dict[str, Any]) -> dict[str, Any]:
-        for key in ("data", "result", "tick", "payload", "body"):
+        for key in ("data", "result", "tick", "payload", "body", "D"):
             value = message.get(key)
             if isinstance(value, dict):
                 return value | {k: v for k, v in message.items() if k not in value}
@@ -318,6 +318,7 @@ class MarketDataRuntime:
             "connector_tasks_total": len(self.tasks),
             "connector_tasks_running": sum(1 for task in self.tasks if not task.done()),
             "connector_tasks_failed": sum(1 for task in self.tasks if task.done() and not task.cancelled()),
+            "raw_message_samples": self._raw_message_samples(),
             "redis_publish_count": self.redis_publish_count,
             "last_publish_timestamp": self.last_publish_at.isoformat() if self.last_publish_at else None,
             "db_insert_count": self.db_insert_count,
@@ -418,6 +419,14 @@ class MarketDataRuntime:
         if venue is ExecutionVenue.coinstore and message is not None and self.raw_messages_logged < 20:
             self.raw_messages_logged += 1
             logger.info("raw_message_received", extra={"venue": venue.value, "raw_message_index": self.raw_messages_logged, "message": message})
+
+    def _raw_message_samples(self) -> dict[str, list[dict[str, Any]]]:
+        samples: dict[str, list[dict[str, Any]]] = {}
+        for connector in self.connectors:
+            raw_samples = getattr(connector, "raw_message_samples", None)
+            if raw_samples:
+                samples[getattr(connector.venue, "value", str(connector.venue))] = raw_samples
+        return samples
 
     async def _handle_message(self, venue: ExecutionVenue, symbol: str, message: dict[str, Any]) -> None:
         logger.info("normalization_attempt", extra={"venue": venue.value, "symbol": symbol, "message_keys": list(message.keys())})

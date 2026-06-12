@@ -196,6 +196,7 @@ class VenueWebSocketConnector:
         self.connection_attempts = 0
         self.messages_received = 0
         self.subscriptions_sent = 0
+        self.raw_message_samples: list[dict[str, Any]] = []
 
     def stop(self) -> None:
         self._stopped.set()
@@ -209,12 +210,18 @@ class VenueWebSocketConnector:
                 async with websockets.connect(self.definition.websocket_url, ping_interval=self.heartbeat_interval_seconds, ping_timeout=self.heartbeat_interval_seconds) as ws:
                     self.connected = True
                     logger.info("websocket_connected", extra={"venue": self.venue.value, "url": self.definition.websocket_url})
-                    await self._subscribe(ws, subscriptions)
+                    if self.venue is not ExecutionVenue.coinstore:
+                        await self._subscribe(ws, subscriptions)
                     delay = 1.0
                     async for raw in ws:
                         message = json.loads(raw) if isinstance(raw, str) else {"binary": raw.hex()}
                         self.messages_received += 1
+                        self._capture_raw_sample(message)
                         logger.info("message_received", extra={"venue": self.venue.value, "messages_received": self.messages_received})
+                        if self.venue is ExecutionVenue.coinstore and self._coinstore_established(message):
+                            await self._subscribe(ws, subscriptions)
+                            await handler(message)
+                            continue
                         if await self._gap_detected(message, subscriptions, recover_snapshot):
                             await self._subscribe(ws, subscriptions)
                             continue
@@ -224,6 +231,15 @@ class VenueWebSocketConnector:
                 logger.warning("venue_websocket_reconnect", extra={"venue": self.venue.value, "error": str(exc), "delay": delay})
                 await asyncio.sleep(delay)
                 delay = min(self.max_reconnect_delay_seconds, delay * 2)
+
+    def _capture_raw_sample(self, message: dict[str, Any]) -> None:
+        if len(self.raw_message_samples) >= 20:
+            return
+        self.raw_message_samples.append(message)
+        logger.info("raw_message_received", extra={"venue": self.venue.value, "raw_message_index": len(self.raw_message_samples), "message": message})
+
+    def _coinstore_established(self, message: dict[str, Any]) -> bool:
+        return str(message.get("T") or "").lower() == "resp" and str(message.get("M") or "").lower() == "established"
 
     async def _subscribe(self, ws: Any, subscriptions: list[StreamSubscription]) -> None:
         for subscription in subscriptions:

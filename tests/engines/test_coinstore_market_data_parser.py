@@ -11,6 +11,7 @@ from mmbot.engines.market_making.engine import QuoteEngine
 from mmbot.engines.market_making.runtime import MarketMakerRuntime
 from mmbot.execution.models import ExecutionVenue
 from mmbot.observability.metrics import RuntimeMetrics
+from mmbot.websocket.connectors import StreamKind, StreamSubscription, VenueWebSocketConnector
 
 
 class MemoryCache:
@@ -41,6 +42,32 @@ class MemoryBus:
     async def publish_event(self, engine, event_type, payload):
         await self.cache.set_json(f"engine:last_event:{engine}", {"engine": engine, "event_type": event_type, "payload": payload})
         return await self.pubsub.publish(f"engine.events.{engine}", {"engine": engine, "event_type": event_type, "payload": payload})
+
+
+class FakeWebSocket:
+    def __init__(self):
+        self.sent = []
+        self.messages = [
+            json.dumps({"S": 1, "T": "resp", "sid": "sid-1", "C": 200, "M": "established"}),
+            json.dumps({"T": "trade", "channel": "BTCUSDT@trade", "price": "100", "volume": "1", "tradeId": 1, "symbol": "BTCUSDT"}),
+        ]
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.messages:
+            raise StopAsyncIteration
+        return self.messages.pop(0)
 
 
 def _settings() -> Settings:
@@ -132,3 +159,30 @@ async def test_market_maker_receives_coinstore_orderbook_and_ticker_from_cache()
 
     assert maker.health()["known_orderbooks"] > 0
     assert maker.health()["known_tickers"] > 0
+
+
+@pytest.mark.asyncio
+async def test_coinstore_connector_subscribes_after_established_and_captures_raw(monkeypatch):
+    fake_ws = FakeWebSocket()
+
+    def fake_connect(*args, **kwargs):
+        return fake_ws
+
+    monkeypatch.setattr("mmbot.websocket.connectors.websockets.connect", fake_connect)
+    connector = VenueWebSocketConnector(ExecutionVenue.coinstore, max_reconnect_delay_seconds=0.01)
+    handled = []
+
+    async def handler(message):
+        handled.append(message)
+        if len(handled) >= 2:
+            connector.stop()
+
+    subscriptions = [StreamSubscription(ExecutionVenue.coinstore, "BTC/USDT", StreamKind.trades)]
+    await connector.connect(subscriptions, handler)
+
+    assert connector.raw_message_samples[0] == {"S": 1, "T": "resp", "sid": "sid-1", "C": 200, "M": "established"}
+    assert fake_ws.sent
+    assert fake_ws.sent[0]["op"] == "SUB"
+    assert fake_ws.sent[0]["channel"] == ["BTCUSDT@trade"]
+    assert handled[0]["M"] == "established"
+    assert handled[1]["T"] == "trade"
