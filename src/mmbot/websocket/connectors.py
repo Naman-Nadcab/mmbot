@@ -195,6 +195,7 @@ class VenueWebSocketConnector:
         self.connected = False
         self.connection_attempts = 0
         self.messages_received = 0
+        self.callback_invocations = 0
         self.subscriptions_sent = 0
         self.raw_message_samples: list[dict[str, Any]] = []
 
@@ -216,15 +217,20 @@ class VenueWebSocketConnector:
                     async for raw in ws:
                         message = json.loads(raw) if isinstance(raw, str) else {"binary": raw.hex()}
                         self.messages_received += 1
+                        logger.info("WEBSOCKET_MESSAGE_RECEIVED", extra={"venue": self.venue.value, "messages_received": self.messages_received, "message_keys": list(message.keys())})
                         self._capture_raw_sample(message)
                         logger.info("message_received", extra={"venue": self.venue.value, "messages_received": self.messages_received})
                         if self.venue is ExecutionVenue.coinstore and self._coinstore_established(message):
                             await self._subscribe(ws, subscriptions)
+                            self.callback_invocations += 1
+                            logger.info("CONNECTOR_CALLBACK_INVOKED", extra={"venue": self.venue.value, "callback_invocations": self.callback_invocations, "message_keys": list(message.keys())})
                             await handler(message)
                             continue
                         if await self._gap_detected(message, subscriptions, recover_snapshot):
                             await self._subscribe(ws, subscriptions)
                             continue
+                        self.callback_invocations += 1
+                        logger.info("CONNECTOR_CALLBACK_INVOKED", extra={"venue": self.venue.value, "callback_invocations": self.callback_invocations, "message_keys": list(message.keys())})
                         await handler(message)
             except Exception as exc:
                 self.connected = False

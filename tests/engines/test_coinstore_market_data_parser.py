@@ -104,6 +104,10 @@ async def test_coinstore_trade_message_publishes_to_redis():
     assert any(channel == "marketdata:trades:coinstore:BTC/USDT" for channel, _ in bus.pubsub.published)
     assert runtime.redis_publish_count >= 2
     assert runtime.metrics.counters["market_data.normalization_success"] == 1
+    assert runtime.health()["runtime_handle_message_enter"] == 1
+    assert runtime.health()["normalization_attempt"] == 1
+    assert runtime.health()["normalization_success"] == 1
+    assert runtime.health()["redis_publish_success"] >= 2
 
 
 @pytest.mark.asyncio
@@ -181,6 +185,8 @@ async def test_coinstore_connector_subscribes_after_established_and_captures_raw
     await connector.connect(subscriptions, handler)
 
     assert connector.raw_message_samples[0] == {"S": 1, "T": "resp", "sid": "sid-1", "C": 200, "M": "established"}
+    assert connector.messages_received == 2
+    assert connector.callback_invocations == 2
     assert fake_ws.sent
     assert fake_ws.sent[0]["op"] == "SUB"
     assert fake_ws.sent[0]["channel"] == ["BTCUSDT@trade"]

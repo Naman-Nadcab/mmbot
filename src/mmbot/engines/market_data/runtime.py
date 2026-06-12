@@ -246,6 +246,10 @@ class MarketDataRuntime:
         self.command_task: asyncio.Task[None] | None = None
         self.pubsub: Any | None = None
         self.websocket_messages_received = 0
+        self.runtime_handle_message_enter_count = 0
+        self.normalization_attempt_count = 0
+        self.normalization_success_count = 0
+        self.redis_publish_success_count = 0
         self.raw_messages_logged = 0
         self.last_websocket_message_at: datetime | None = None
         self.last_websocket_message_by_venue: dict[str, datetime] = {}
@@ -310,6 +314,11 @@ class MarketDataRuntime:
         return {
             "active_subscriptions": self.active_subscriptions,
             "websocket_messages_received": self.websocket_messages_received,
+            "connector_callback_invoked": sum(int(getattr(connector, "callback_invocations", 0) or 0) for connector in self.connectors),
+            "runtime_handle_message_enter": self.runtime_handle_message_enter_count,
+            "normalization_attempt": self.normalization_attempt_count,
+            "normalization_success": self.normalization_success_count,
+            "redis_publish_success": self.redis_publish_success_count,
             "last_websocket_message_timestamp": self.last_websocket_message_at.isoformat() if self.last_websocket_message_at else None,
             "last_websocket_message_by_venue": {key: value.isoformat() for key, value in self.last_websocket_message_by_venue.items()},
             "last_message_timestamp": {key: value.isoformat() for key, value in self.last_message_at.items()},
@@ -429,6 +438,12 @@ class MarketDataRuntime:
         return samples
 
     async def _handle_message(self, venue: ExecutionVenue, symbol: str, message: dict[str, Any]) -> None:
+        self.runtime_handle_message_enter_count += 1
+        self.metrics.increment("market_data.runtime_handle_message_enter")
+        logger.info("RUNTIME_HANDLE_MESSAGE_ENTER", extra={"venue": venue.value, "symbol": symbol, "runtime_handle_message_enter": self.runtime_handle_message_enter_count, "message_keys": list(message.keys())})
+        self.normalization_attempt_count += 1
+        self.metrics.increment("market_data.normalization_attempt")
+        logger.info("NORMALIZATION_ATTEMPT", extra={"venue": venue.value, "symbol": symbol, "normalization_attempt": self.normalization_attempt_count, "message_keys": list(message.keys())})
         logger.info("normalization_attempt", extra={"venue": venue.value, "symbol": symbol, "message_keys": list(message.keys())})
         try:
             normalized = self.normalizer.normalize(venue, symbol, message)
@@ -441,7 +456,9 @@ class MarketDataRuntime:
             logger.info("normalization_dropped", extra={"venue": venue.value, "symbol": symbol, "reason": "unrecognized_or_control_message", "message": message})
             return
         kind, payload = normalized
+        self.normalization_success_count += 1
         self.metrics.increment("market_data.normalization_success")
+        logger.info("NORMALIZATION_SUCCESS", extra={"venue": venue.value, "symbol": symbol, "kind": kind, "normalization_success": self.normalization_success_count})
         logger.info("normalization_success", extra={"venue": venue.value, "symbol": symbol, "kind": kind})
         key = f"{venue.value}:{symbol}"
         self.last_message_at[key] = datetime.now(timezone.utc)
@@ -472,8 +489,10 @@ class MarketDataRuntime:
         await self.bus.cache.set_json(f"latest:{channel}", payload, ttl_seconds=300)
         await self.bus.pubsub.publish(channel, payload)
         self.redis_publish_count += 1
+        self.redis_publish_success_count += 1
         self.last_publish_at = datetime.now(timezone.utc)
         self.metrics.increment("market_data.redis_publish_success")
+        logger.info("REDIS_PUBLISH_SUCCESS", extra={"channel": channel, "redis_publish_success": self.redis_publish_success_count, "publish_count": self.redis_publish_count})
         logger.info("redis_publish_success", extra={"channel": channel, "publish_count": self.redis_publish_count})
 
     async def _ensure_trading_pair(self, exchange: str, symbol: str) -> uuid.UUID | None:
