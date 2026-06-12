@@ -28,3 +28,7 @@ def main() -> None:
     parser.add_argument("action", choices=["migrate", "seed", "all"])
     args = parser.parse_args()
     asyncio.run(_run(args.action))
+
+
+if __name__ == "__main__":
+    main()
