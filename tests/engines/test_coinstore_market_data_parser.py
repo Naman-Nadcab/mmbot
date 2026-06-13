@@ -48,7 +48,7 @@ class FakeWebSocket:
     def __init__(self):
         self.sent = []
         self.messages = [
-            json.dumps({"S": 1, "T": "resp", "sid": "sid-1", "C": 200, "M": "established"}),
+            json.dumps({"S": 1, "T": "req", "sid": "sid-1", "C": 200, "M": "established"}),
             json.dumps({"T": "trade", "channel": "BTCUSDT@trade", "price": "100", "volume": "1", "tradeId": 1, "symbol": "BTCUSDT"}),
         ]
 
@@ -184,7 +184,7 @@ async def test_coinstore_connector_subscribes_after_established_and_captures_raw
     subscriptions = [StreamSubscription(ExecutionVenue.coinstore, "BTC/USDT", StreamKind.trades)]
     await connector.connect(subscriptions, handler)
 
-    assert connector.raw_message_samples[0] == {"S": 1, "T": "resp", "sid": "sid-1", "C": 200, "M": "established"}
+    assert connector.raw_message_samples[0] == {"S": 1, "T": "req", "sid": "sid-1", "C": 200, "M": "established"}
     assert connector.messages_received == 2
     assert connector.callback_invocations == 2
     assert fake_ws.sent

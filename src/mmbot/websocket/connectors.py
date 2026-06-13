@@ -245,7 +245,8 @@ class VenueWebSocketConnector:
         logger.info("raw_message_received", extra={"venue": self.venue.value, "raw_message_index": len(self.raw_message_samples), "raw_message": message})
 
     def _coinstore_established(self, message: dict[str, Any]) -> bool:
-        return str(message.get("T") or "").lower() == "resp" and str(message.get("M") or "").lower() == "established"
+        message_type = str(message.get("T") or "").lower()
+        return message_type in {"req", "resp"} and str(message.get("M") or "").lower() == "established"
 
     async def _subscribe(self, ws: Any, subscriptions: list[StreamSubscription]) -> None:
         for subscription in subscriptions:
