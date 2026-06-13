@@ -23,10 +23,10 @@ const configDomains = {
 const supportedExchanges = ['coinstore', 'mexc', 'gate', 'bitmart', 'kucoin', 'binance'];
 const campaignTemplates = {
   liquidity_builder: {
-    label: 'Liquidity Builder',
+    label: 'Increase Liquidity',
     tone: 'green',
-    purpose: 'Create tight books and healthy liquidity.',
-    recommended: 'New tokens and long-term projects',
+    purpose: 'Create tighter books and healthier liquidity.',
+    recommended: 'Projects that want stronger order books',
     riskLevel: 'low',
     spreadBps: 18,
     layers: 5,
@@ -35,10 +35,10 @@ const campaignTemplates = {
     volumeMultiplier: 0.8
   },
   balanced: {
-    label: 'Balanced Market Making',
+    label: 'Keep Price Stable',
     tone: 'yellow',
-    purpose: 'Normal day-to-day market making.',
-    recommended: 'Most projects',
+    purpose: 'Support orderly day-to-day trading around your preferred zone.',
+    recommended: 'Most projects and steady markets',
     riskLevel: 'medium',
     spreadBps: 24,
     layers: 4,
@@ -47,7 +47,7 @@ const campaignTemplates = {
     volumeMultiplier: 1
   },
   volume_booster: {
-    label: 'Volume Booster',
+    label: 'Increase Trading Volume',
     tone: 'red',
     purpose: 'Increase market activity.',
     recommended: 'Growing markets',
@@ -59,7 +59,7 @@ const campaignTemplates = {
     volumeMultiplier: 1.4
   },
   token_launch: {
-    label: 'Token Launch Mode',
+    label: 'Token Launch',
     tone: 'blue',
     purpose: 'Support newly listed tokens.',
     recommended: 'Launch campaigns',
@@ -104,15 +104,22 @@ state.orderSort = { key: 'created_at', direction: 'desc' };
 state.lastConnectionTest = null;
 state.monitorTab = 'open-orders';
 state.expertMode = localStorage.getItem('ops.expertMode') === 'true';
+state.launchStep = Number(localStorage.getItem('ops.launchStep') || 1);
 state.dismissedRecommendations = new Set(JSON.parse(localStorage.getItem('ops.dismissedRecommendations') || '[]'));
 state.onboardingResumeLater = localStorage.getItem('ops.onboardingResumeLater') === 'true';
 state.mmCampaign = {
   name: localStorage.getItem('ops.campaignName') || '',
+  exchange: localStorage.getItem('ops.campaignExchange') || 'coinstore',
   pair: localStorage.getItem('ops.campaignPair') || 'BTC/USDT',
   budget: Number(localStorage.getItem('ops.campaignBudget') || 1000),
   riskLevel: localStorage.getItem('ops.campaignRisk') || 'medium',
   targetDailyVolume: Number(localStorage.getItem('ops.campaignVolume') || 10000),
-  template: localStorage.getItem('ops.campaignTemplate') || ''
+  template: localStorage.getItem('ops.campaignTemplate') || '',
+  currentPrice: Number(localStorage.getItem('ops.currentPrice') || 0.1),
+  priceFloor: Number(localStorage.getItem('ops.priceFloor') || 0.08),
+  priceCeiling: Number(localStorage.getItem('ops.priceCeiling') || 0.15),
+  preferredMin: Number(localStorage.getItem('ops.preferredMin') || 0.095),
+  preferredMax: Number(localStorage.getItem('ops.preferredMax') || 0.11)
 };
 
 const $ = (id) => document.getElementById(id);
@@ -382,6 +389,12 @@ function switchPage(id) {
   document.querySelectorAll('.page').forEach((item) => item.classList.toggle('active', item.id === `page-${id}`));
 }
 
+function setLaunchStep(step) {
+  state.launchStep = Math.max(1, Math.min(8, Number(step) || 1));
+  localStorage.setItem('ops.launchStep', String(state.launchStep));
+  renderLaunchWizard();
+}
+
 function setExpertMode(enabled) {
   state.expertMode = Boolean(enabled);
   localStorage.setItem('ops.expertMode', String(state.expertMode));
@@ -393,11 +406,17 @@ function setExpertMode(enabled) {
 
 function persistCampaign() {
   localStorage.setItem('ops.campaignName', state.mmCampaign.name || '');
+  localStorage.setItem('ops.campaignExchange', state.mmCampaign.exchange || 'coinstore');
   localStorage.setItem('ops.campaignPair', state.mmCampaign.pair || '');
   localStorage.setItem('ops.campaignBudget', String(state.mmCampaign.budget || 0));
   localStorage.setItem('ops.campaignRisk', state.mmCampaign.riskLevel || '');
   localStorage.setItem('ops.campaignVolume', String(state.mmCampaign.targetDailyVolume || 0));
   localStorage.setItem('ops.campaignTemplate', state.mmCampaign.template || '');
+  localStorage.setItem('ops.currentPrice', String(state.mmCampaign.currentPrice || 0));
+  localStorage.setItem('ops.priceFloor', String(state.mmCampaign.priceFloor || 0));
+  localStorage.setItem('ops.priceCeiling', String(state.mmCampaign.priceCeiling || 0));
+  localStorage.setItem('ops.preferredMin', String(state.mmCampaign.preferredMin || 0));
+  localStorage.setItem('ops.preferredMax', String(state.mmCampaign.preferredMax || 0));
 }
 
 function campaignExists() {
@@ -417,11 +436,11 @@ function connectWebSocket() {
   url.searchParams.set('token', state.token);
   const socket = new WebSocket(url.toString());
   state.socket = socket;
-  setPill('ws-status', 'WebSocket connecting', 'warn');
-  socket.onopen = () => { setPill('ws-status', 'WebSocket connected', 'ok'); logEvent('websocket_connected'); };
-  socket.onerror = () => { setPill('ws-status', 'WebSocket error', 'bad'); };
+  setPill('ws-status', 'Live updates connecting', 'warn');
+  socket.onopen = () => { setPill('ws-status', 'Live updates connected', 'ok'); logEvent('websocket_connected'); };
+  socket.onerror = () => { setPill('ws-status', 'Live updates error', 'bad'); };
   socket.onclose = () => {
-    setPill('ws-status', 'WebSocket disconnected', 'warn');
+    setPill('ws-status', 'Live updates disconnected', 'warn');
     if (!state.manualDisconnect) state.wsReconnectTimer = setTimeout(connectWebSocket, 3000);
   };
   socket.onmessage = (event) => handleStreamMessage(event.data);
@@ -512,7 +531,8 @@ function initCoinstore() {
     }
   });
   $('coinstore-sync').addEventListener('click', async (event) => {
-    const confirmation = prompt('Type sync to confirm Coinstore balance sync');
+    const exchangeName = selectedExchangeName();
+    const confirmation = prompt(`Type sync to confirm ${title(exchangeName)} balance sync`);
     if (!confirmation) return;
     if (!confirmation.toLowerCase().includes('sync')) {
       logEvent('coinstore_balance_sync_rejected', { reason: "confirmation must include 'sync'" });
@@ -520,9 +540,9 @@ function initCoinstore() {
     }
     try {
       setPending('coinstore:sync', true, event.target);
-      const account = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore')?.accounts?.[0];
-      const result = await request('/exchanges/coinstore/sync', { method: 'POST', body: JSON.stringify({ account_alias: account?.account_alias || 'primary', environment: account?.environment || 'production' }) });
-      logEvent('coinstore_balance_sync', result);
+      const account = selectedExchangeAccount();
+      const result = await request(`/exchanges/${encodeURIComponent(exchangeName)}/sync`, { method: 'POST', body: JSON.stringify({ account_alias: account?.account_alias || 'primary', environment: account?.environment || 'production' }) });
+      logEvent('exchange_balance_sync', result);
       await refreshCoinstore();
       await refreshOperations();
       renderAll();
@@ -717,6 +737,7 @@ function renderAll() {
   renderLiveMarketData();
   renderMarketMakerStatus();
   renderInventoryManagement();
+  renderLaunchWizard();
   renderOnboardingWizard();
   renderTemplates();
   renderDashboardSummary();
@@ -729,11 +750,34 @@ function renderAll() {
   renderRuntimeAckState();
 }
 
+function renderLaunchWizard() {
+  const steps = [
+    ['Exchange', Boolean(selectedExchangeName())],
+    ['API', isConnected(selectedExchangeAccount()?.connection_status || selectedExchangeAccount()?.rest_status)],
+    ['Balance', (state.data.exchangeBalances?.[selectedExchangeName()]?.balances || []).length > 0],
+    ['Pair', Boolean(state.mmCampaign.pair)],
+    ['Price Range', validPriceRange()],
+    ['Goal', Boolean(state.mmCampaign.template)],
+    ['Budget', Number(state.mmCampaign.budget || 0) > 0],
+    ['Launch', readinessState().criticalFailures.length === 0]
+  ];
+  const stepper = $('launch-stepper');
+  if (stepper) {
+    stepper.innerHTML = steps.map(([label, complete], index) => `<button type="button" class="launch-step ${state.launchStep === index + 1 ? 'active' : ''} ${complete ? 'complete' : ''}" data-launch-step="${index + 1}"><span>${index + 1}</span>${esc(label)}</button>`).join('');
+  }
+  document.querySelectorAll('[data-launch-step-panel]').forEach((panel) => panel.classList.toggle('active', Number(panel.dataset.launchStepPanel) === state.launchStep));
+}
+
+function validPriceRange() {
+  const { currentPrice, priceFloor, priceCeiling, preferredMin, preferredMax } = state.mmCampaign;
+  return Number(priceFloor) > 0 && Number(priceCeiling) > Number(priceFloor) && Number(preferredMin) >= Number(priceFloor) && Number(preferredMax) <= Number(priceCeiling) && Number(currentPrice) > 0;
+}
+
 function renderQuickStartWizard() {
   const integrations = state.data.exchangeIntegrations || [];
   const coinstore = integrations.find((item) => item.exchange_name === 'coinstore');
   const account = coinstore?.accounts?.[0];
-  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  const balances = state.data.exchangeBalances?.[selectedExchangeName()]?.balances || [];
   const makerRuntime = state.data.engines?.['market-maker-engine']?.runtime || {};
   const kill = state.data.kill || {};
   const steps = [
@@ -768,14 +812,14 @@ function renderOnboardingWizard() {
 }
 
 function onboardingSteps() {
-  const account = coinstoreAccount();
-  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  const account = selectedExchangeAccount();
+  const balances = state.data.exchangeBalances?.[selectedExchangeName()]?.balances || [];
   const readiness = readinessState();
   return [
-    { label: 'Connect Exchange', complete: Boolean(account), detail: account ? 'Coinstore account exists' : 'Connect a Coinstore account' },
+    { label: 'Connect Exchange', complete: Boolean(account), detail: account ? `${title(selectedExchangeName())} account exists` : 'Connect an exchange account' },
     { label: 'Add API Credentials', complete: Boolean(account?.has_api_key && account?.has_api_secret), detail: account?.api_key_masked || 'Add API key and secret' },
     { label: 'Test Connection', complete: isConnected(account?.connection_status || account?.rest_status), detail: account?.last_success_at || account?.last_error_message || 'Run connection test' },
-    { label: 'Sync Balances', complete: balances.length > 0, detail: balances.length ? `${balances.length} assets synced` : 'Sync balances from Coinstore' },
+    { label: 'Sync Balances', complete: balances.length > 0, detail: balances.length ? `${balances.length} assets synced` : `Sync balances from ${title(selectedExchangeName())}` },
     { label: 'Create Campaign', complete: campaignExists(), detail: campaignExists() ? state.mmCampaign.name : 'Select a template and campaign details' },
     { label: 'Review', complete: readiness.score >= 75, detail: `${readiness.score}% readiness score` },
     { label: 'Start Market Making', complete: state.data.engines?.['market-maker-engine']?.runtime?.trading_enabled !== false && Boolean(state.data.engines?.['market-maker-engine']), detail: state.data.engines?.['market-maker-engine'] ? 'Runtime available' : 'Start after readiness checks pass' }
@@ -793,7 +837,7 @@ function renderTemplates() {
       <strong>${esc(template.label)}</strong>
       <small><b>Purpose:</b> ${esc(template.purpose)}</small>
       <small><b>Recommended for:</b> ${esc(template.recommended)}</small>
-      <small>Automatically configures spread, layers, inventory target, risk profile and refresh intervals.</small>
+      <small>Rocket MM automatically handles order amount, market depth, token balance target, risk profile and update speed.</small>
     </button>`;
   }).join('');
 }
@@ -805,6 +849,7 @@ function applyTemplate(key) {
   state.mmCampaign.riskLevel = template.riskLevel;
   if (!state.mmCampaign.name) state.mmCampaign.name = `${template.label} Campaign`;
   state.mmCampaign.targetDailyVolume = Math.max(10000, Math.round(Number(state.mmCampaign.budget || 1000) * 10 * template.volumeMultiplier));
+  state.launchStep = Math.max(state.launchStep, 7);
   persistCampaign();
   const name = $('campaign-name');
   const volume = $('target-daily-volume');
@@ -814,6 +859,7 @@ function applyTemplate(key) {
   renderTemplates();
   renderMarketMakingCampaign();
   renderReadiness();
+  renderLaunchWizard();
 }
 
 function renderPremiumKpis() {
@@ -832,19 +878,25 @@ function renderLiveMarketData() {
   const { bid, ask, depth, symbol } = bestBidAsk(book);
   const mid = bid && ask ? (bid + ask) / 2 : currentMidPrice();
   const spread = bid && ask && mid ? ((ask - bid) / mid) * 10000 : currentSpreadBps();
+  if (mid > 0) {
+    state.mmCampaign.currentPrice = mid;
+    localStorage.setItem('ops.currentPrice', String(mid));
+  }
   setText('market-data-symbol', symbol || book?.symbol || 'symbol');
   setText('market-data-bid', num(bid));
   setText('market-data-ask', num(ask));
   setText('market-data-mid', num(mid));
   setText('market-data-spread', `${num(spread)} bps`);
   setText('market-data-depth', money(depth));
+  setText('current-price-kpi', num(mid || state.mmCampaign.currentPrice));
 }
 
 function renderCoinstoreCompact() {
-  const integration = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore');
+  const exchangeName = selectedExchangeName();
+  const integration = selectedExchangeIntegration();
   const account = integration?.accounts?.[0];
-  const health = state.data.coinstore.health || {};
-  const balancesPayload = state.data.exchangeBalances?.coinstore || {};
+  const health = exchangeName === 'coinstore' ? state.data.coinstore.health || {} : {};
+  const balancesPayload = state.data.exchangeBalances?.[exchangeName] || {};
   const balances = balancesPayload.balances || [];
   setText('summary-connection', simpleStatus(account?.connection_status || health.rest?.status || 'Disconnected'));
   setText('summary-rest', account?.rest_status || health.rest?.status || 'Unknown');
@@ -875,8 +927,8 @@ function renderCoinstoreCompact() {
     results.innerHTML = [
       stackItem('Connection Status', connectionStatus),
       stackItem('REST Status', account?.rest_status || health.rest?.status || 'not checked'),
-      stackItem('Public WebSocket', account?.websocket_status || health.websocket?.status || 'not checked'),
-      stackItem('Private WebSocket', account?.private_ws_status || 'not checked'),
+      stackItem('Market Stream', account?.websocket_status || health.websocket?.status || 'not checked'),
+      stackItem('Account Stream', account?.private_ws_status || 'not checked'),
       stackItem('API Key', account?.api_key_masked || 'not configured'),
       stackItem('Last Tested', account?.last_tested_at || 'never'),
       stackItem('Last Success', account?.last_success_at || 'never'),
@@ -886,13 +938,13 @@ function renderCoinstoreCompact() {
 }
 
 function renderDashboardSummary() {
-  const integration = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore');
+  const integration = selectedExchangeIntegration();
   const account = integration?.accounts?.[0];
   const maker = state.data.engines?.['market-maker-engine'] || {};
   const makerRuntime = maker.runtime || {};
   const exchangeStatus = account?.connection_status || integration?.status || state.data.coinstore.health?.rest?.status || 'Disconnected';
   setText('dashboard-exchange-status', simpleStatus(exchangeStatus));
-  setText('dashboard-exchange-subtitle', account ? `${account.account_alias} / ${account.environment}` : 'Coinstore');
+  setText('dashboard-exchange-subtitle', account ? `${title(integration.exchange_name)} ${account.account_alias}` : title(selectedExchangeName()));
   setText('dashboard-mm-status', makerRuntime.trading_enabled === false ? 'Paused' : simpleStatus(maker.status || makerRuntime.mode || 'Unknown'));
   setText('dashboard-mm-subtitle', makerRuntime.mode || 'Runtime');
   setHealth('health-api', 'health-api-dot', state.data.infrastructure?.api || 'checking');
@@ -938,23 +990,28 @@ function renderMarketMakingCampaign() {
   const review = $('mm-review');
   if (review) {
     review.innerHTML = [
+      stackItem('Exchange', title(selectedExchangeName())),
       stackItem('Campaign Name', state.mmCampaign.name),
       stackItem('Trading Pair', state.mmCampaign.pair),
+      stackItem('Current Price', num(state.mmCampaign.currentPrice)),
+      stackItem('Price Floor', num(state.mmCampaign.priceFloor)),
+      stackItem('Price Ceiling', num(state.mmCampaign.priceCeiling)),
+      stackItem('Preferred Zone', `${num(state.mmCampaign.preferredMin)} - ${num(state.mmCampaign.preferredMax)}`),
       stackItem('Budget', `${num(state.mmCampaign.budget)} USDT`),
+      stackItem('Goal', campaignTemplates[state.mmCampaign.template]?.label || 'Select goal'),
       stackItem('Risk Level', title(state.mmCampaign.riskLevel)),
-      stackItem('Target Daily Volume', `${num(state.mmCampaign.targetDailyVolume)} USDT`),
-      stackItem('Spread', `${num(auto.spreadBps)} bps`),
-      stackItem('Quote Size', `${num(auto.quoteSize)} USDT`)
+      stackItem('Estimated Daily Volume', `${num(state.mmCampaign.targetDailyVolume)} USDT`),
+      stackItem('Estimated Spread', `${num(auto.spreadBps)} bps`)
     ].join('');
   }
   const autoSummary = $('automatic-settings-summary');
   if (autoSummary) {
     autoSummary.innerHTML = [
       stackItem('Spread', `${num(auto.spreadBps)} bps`),
-      stackItem('Layers', auto.layers),
-      stackItem('Quote Size', `${num(auto.quoteSize)} USDT`),
+      stackItem('Market Depth', auto.layers),
+      stackItem('Order Amount', `${num(auto.quoteSize)} USDT`),
       stackItem('Inventory Target', `${num(auto.inventoryTarget * 100)}%`),
-      stackItem('Refresh Rate', `${num(auto.refreshRateSeconds)}s`),
+      stackItem('Update Speed', `${num(auto.refreshRateSeconds)}s`),
       stackItem('Risk Limit', `${num(auto.riskLimit)} USDT`)
     ].join('');
   }
@@ -962,10 +1019,10 @@ function renderMarketMakingCampaign() {
   if (advanced) {
     advanced.innerHTML = [
       stackItem('Spread', `${num(auto.spreadBps)} bps`),
-      stackItem('Layers', auto.layers),
-      stackItem('Quote Size', `${num(auto.quoteSize)} USDT`),
+      stackItem('Market Depth', auto.layers),
+      stackItem('Order Amount', `${num(auto.quoteSize)} USDT`),
       stackItem('Inventory Target', `${num(auto.inventoryTarget * 100)}%`),
-      stackItem('Refresh Rate', `${num(auto.refreshRateSeconds)}s`),
+      stackItem('Update Speed', `${num(auto.refreshRateSeconds)}s`),
       stackItem('Risk Controls', `${num(auto.riskLimit)} USDT max exposure`)
     ].join('');
   }
@@ -974,9 +1031,19 @@ function renderMarketMakingCampaign() {
   const name = $('campaign-name');
   const budget = $('mm-budget');
   const volume = $('target-daily-volume');
+  const currentPrice = $('current-price');
+  const floor = $('price-floor');
+  const ceiling = $('price-ceiling');
+  const preferredMin = $('preferred-zone-min');
+  const preferredMax = $('preferred-zone-max');
   if (name && name.value !== state.mmCampaign.name) name.value = state.mmCampaign.name;
   if (budget && Number(budget.value) !== Number(state.mmCampaign.budget)) budget.value = String(state.mmCampaign.budget);
   if (volume && Number(volume.value) !== Number(state.mmCampaign.targetDailyVolume)) volume.value = String(state.mmCampaign.targetDailyVolume);
+  if (currentPrice && Number(currentPrice.value) !== Number(state.mmCampaign.currentPrice)) currentPrice.value = String(state.mmCampaign.currentPrice);
+  if (floor && Number(floor.value) !== Number(state.mmCampaign.priceFloor)) floor.value = String(state.mmCampaign.priceFloor);
+  if (ceiling && Number(ceiling.value) !== Number(state.mmCampaign.priceCeiling)) ceiling.value = String(state.mmCampaign.priceCeiling);
+  if (preferredMin && Number(preferredMin.value) !== Number(state.mmCampaign.preferredMin)) preferredMin.value = String(state.mmCampaign.preferredMin);
+  if (preferredMax && Number(preferredMax.value) !== Number(state.mmCampaign.preferredMax)) preferredMax.value = String(state.mmCampaign.preferredMax);
   document.querySelectorAll('[data-budget]').forEach((button) => {
     const active = Number(button.dataset.budget) === Number(state.mmCampaign.budget);
     button.classList.toggle('active', active);
@@ -993,7 +1060,7 @@ function renderMarketMakingCampaign() {
     button.classList.toggle('secondary', !active);
   });
   setText('campaign-status-name', state.mmCampaign.name || 'Market Making Campaign');
-  setText('campaign-status-exchange', 'Coinstore');
+  setText('campaign-status-exchange', title(selectedExchangeName()));
   setText('campaign-status-pair', state.mmCampaign.pair);
   setText('campaign-status-budget', `${num(state.mmCampaign.budget)} USDT`);
   const used = Number(state.data.volume?.daily?.executed_notional || 0);
@@ -1005,6 +1072,15 @@ function renderMarketMakingCampaign() {
   if (pill) {
     pill.textContent = status;
     pill.className = `status-chip ${status === 'Running' ? 'ok' : status === 'Paused' ? 'warn' : 'bad'}`;
+  }
+  setText('campaign-status-state-copy', status);
+  const monitorSummary = $('campaign-monitor-summary');
+  if (monitorSummary) {
+    monitorSummary.innerHTML = [
+      stackItem('Goal', campaignTemplates[state.mmCampaign.template]?.label || 'Not selected'),
+      stackItem('Price Zone', `${num(state.mmCampaign.preferredMin)} - ${num(state.mmCampaign.preferredMax)}`),
+      stackItem('Remaining Budget', `${num(Math.max(0, state.mmCampaign.budget - used))} USDT`)
+    ].join('');
   }
 }
 
@@ -1036,7 +1112,7 @@ function readinessState() {
   const items = [
     { label: 'Exchange Connected', detail: account ? account.account_alias : 'No exchange account connected', state: account ? 'ok' : 'bad', critical: true },
     { label: 'API Valid', detail: account?.last_error_message || account?.last_success_at || 'Connection test required', state: isConnected(account?.connection_status || account?.rest_status) ? 'ok' : account ? 'warn' : 'bad', critical: true },
-    { label: 'Private WS Connected', detail: account?.private_ws_status || 'No private stream status', state: isConnected(account?.private_ws_status) || account?.private_ws_status === 'not_supported' ? 'ok' : account ? 'warn' : 'bad', critical: false },
+    { label: 'Account Stream Connected', detail: account?.private_ws_status || 'No account stream status', state: isConnected(account?.private_ws_status) || account?.private_ws_status === 'not_supported' ? 'ok' : account ? 'warn' : 'bad', critical: false },
     { label: 'Balance Synced', detail: balances.length ? `${balances.length} assets synced` : 'No synced balances', state: balances.length ? 'ok' : 'bad', critical: true },
     { label: 'Trading Pair Available', detail: state.mmCampaign.pair || 'Select a trading pair', state: hasPair ? 'ok' : 'bad', critical: true },
     { label: 'Budget Assigned', detail: `${num(state.mmCampaign.budget)} USDT`, state: state.mmCampaign.budget > 0 ? 'ok' : 'bad', critical: true },
@@ -1066,7 +1142,7 @@ function renderReadiness() {
 function recommendations() {
   const list = [];
   const balances = state.data.exchangeBalances?.coinstore?.balances || [];
-  const current = Number(state.data.exchangeBalances?.coinstore?.inventory_ratio || 0);
+  const current = Number(state.data.exchangeBalances?.[selectedExchangeName()]?.inventory_ratio || 0);
   const target = automaticCampaignSettings().inventoryTarget;
   const deviation = current - target;
   const spread = currentSpreadBps();
@@ -1075,7 +1151,7 @@ function recommendations() {
   const maxExposure = Number(state.data.engines?.['market-maker-engine']?.runtime?.runtime_config?.inventory?.max_asset_exposure || 0);
   const usage = maxExposure ? exposure / maxExposure : 0;
   const lifecycle = orderLifecycle();
-  if (!balances.length) list.push({ id: 'sync-balances', title: 'Balance sync recommended', reason: 'No synced balances are available from Coinstore.', action: 'Sync balances', type: 'sync' });
+  if (!balances.length) list.push({ id: 'sync-balances', title: 'Balance sync needed', reason: `No synced balances are available from ${title(selectedExchangeName())}.`, action: 'Sync balances', type: 'sync' });
   if (Math.abs(deviation) > 0.08) list.push({ id: 'inventory-target', title: deviation < 0 ? 'Inventory below target' : 'Inventory above target', reason: `Current ratio is ${num(current * 100)}% vs target ${num(target * 100)}%.`, action: 'Review inventory', type: 'review-monitoring' });
   if (state.mmCampaign.budget > 0 && usage > 0.8) list.push({ id: 'risk-utilization', title: 'Risk utilization approaching threshold', reason: `${num(usage * 100)}% of max exposure is currently used.`, action: 'Review risk', type: 'review-settings' });
   if (spread > 35) list.push({ id: 'tighten-spread', title: 'Spread can be tightened', reason: `Current spread is ${num(spread)} bps.`, action: 'Review campaign', type: 'review-campaign' });
@@ -1089,7 +1165,7 @@ function renderRecommendations() {
   const target = $('recommendations-list');
   if (!target) return;
   const items = recommendations();
-  target.innerHTML = items.length ? items.map((item) => `<article class="recommendation-card" data-recommendation="${esc(item.id)}"><strong>${esc(item.title)}</strong><p>${esc(item.reason)}</p><small>Suggested action: ${esc(item.action)}</small><div class="recommendation-actions"><button type="button" data-recommendation-action="apply">Apply Recommendation</button><button type="button" class="secondary" data-recommendation-action="review">Review</button><button type="button" class="ghost" data-recommendation-action="dismiss">Dismiss</button></div></article>`).join('') : '<div class="empty">No live recommendations at this time</div>';
+  target.innerHTML = items.length ? items.map((item) => `<article class="recommendation-card" data-recommendation="${esc(item.id)}"><strong>${esc(item.title)}</strong><p>${esc(item.reason)}</p><small>Suggested action: ${esc(item.action)}</small><div class="recommendation-actions"><button type="button" data-recommendation-action="apply">Fix Now</button><button type="button" class="secondary" data-recommendation-action="review">Learn More</button><button type="button" class="ghost" data-recommendation-action="dismiss">Dismiss</button></div></article>`).join('') : '<div class="empty">No live recommendations at this time</div>';
 }
 
 function handleRecommendation(id, action) {
@@ -1108,6 +1184,7 @@ function handleRecommendation(id, action) {
     setExpertMode(true);
   } else if (item.type === 'review-campaign') {
     switchPage('launch-mm');
+    setLaunchStep(6);
   } else {
     switchPage('monitor-mm');
   }
@@ -1160,6 +1237,7 @@ function renderRiskInventoryUx() {
   const riskScore = Math.min(100, Math.round(Math.abs(deviation) * 2 + usage * 0.45 + riskEvents.length * 5));
   const health = riskScore >= 75 ? 'Critical' : riskScore >= 45 ? 'Warning' : 'Healthy';
   setText('inventory-health-label', deviation > 1 ? 'Overweight' : deviation < -1 ? 'Underweight' : 'Balanced');
+  setText('inventory-health-kpi', deviation > 1 ? 'Overweight' : deviation < -1 ? 'Underweight' : 'Balanced');
   setText('target-inventory-ratio', `${num(target * 100)}%`);
   setText('inventory-deviation', `${num(deviation)}%`);
   setText('risk-score', String(riskScore));
@@ -1289,7 +1367,7 @@ function renderRisk() {
   if (target) {
     target.innerHTML = [
       stackItem('Max Position Notional', money(config.max_position_notional || 0)),
-      stackItem('Max Total Exposure', money(config.max_total_exposure || 0)),
+      stackItem('Max Capital At Risk', money(config.max_total_exposure || 0)),
       stackItem('Max Order Notional', money(config.max_order_notional || 0)),
       stackItem('Max Open Orders', config.max_open_orders || 0),
       stackItem('Circuit Breaker', config.circuit_breaker_enabled === false ? 'disabled' : 'enabled')
@@ -1339,13 +1417,13 @@ function renderMarketMakerStatus() {
 }
 
 function renderInventoryManagement() {
-  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  const balances = state.data.exchangeBalances?.[selectedExchangeName()]?.balances || [];
   const usdt = balances.find((item) => item.asset === 'USDT') || {};
   const base = balances.find((item) => item.asset && item.asset !== 'USDT') || {};
   const inv = state.data.inventory || {};
   const maker = state.data.engines?.['market-maker-engine']?.runtime || {};
   const target = maker.runtime_config?.inventory?.target_base_ratio ?? 0;
-  const current = state.data.exchangeBalances?.coinstore?.inventory_ratio ?? 0;
+  const current = state.data.exchangeBalances?.[selectedExchangeName()]?.inventory_ratio ?? 0;
   const maxExposure = maker.runtime_config?.inventory?.max_asset_exposure ?? 0;
   const exposure = inv.exposure_notional ?? inv.total_notional ?? 0;
   const skew = (current - target) * 100;
@@ -1354,16 +1432,16 @@ function renderInventoryManagement() {
   $('inventory-panel-live').innerHTML = [
     stackItem('USDT Balance', num(usdt.available_balance || 0)),
     stackItem('Token Balance', `${base.asset || 'Base'} ${num(base.available_balance || 0)}`),
-    stackItem('Target Inventory Ratio', `${num(target * 100)}%`),
+    stackItem('Target Token %', `${num(target * 100)}%`),
     stackItem('Current Ratio', `${num(current * 100)}%`),
-    stackItem('Inventory Skew', `${num(skew)}%`),
-    stackItem('Inventory Bias', bias),
-    stackItem('Exposure', money(exposure)),
-    stackItem('Max Exposure', money(maxExposure))
+    stackItem('Token Imbalance', `${num(skew)}%`),
+    stackItem('Balance Bias', bias),
+    stackItem('Capital At Risk', money(exposure)),
+    stackItem('Max Capital At Risk', money(maxExposure))
   ].join('');
   const bar = $('inventory-ratio-bar');
   if (bar) bar.style.width = `${Math.max(0, Math.min(100, current * 100))}%`;
-  setText('portfolio-value', money(state.data.exchangeBalances?.coinstore?.portfolio_value || 0));
+  setText('portfolio-value', money(state.data.exchangeBalances?.[selectedExchangeName()]?.portfolio_value || 0));
   setText('inventory-ratio-value', `${num(current * 100)}%`);
   setText('inventory-gauge-value', `${num(current * 100)}%`);
 }
@@ -1425,7 +1503,7 @@ function renderCoinstore() {
   $('coinstore-state').innerHTML = [
     stackItem('REST Health', health.rest?.status || 'not checked'),
     stackItem('REST Latency', `${num(health.rest?.latency_ms)} ms`),
-    stackItem('WebSocket Health', health.websocket?.status || 'not checked'),
+    stackItem('Market Stream Health', health.websocket?.status || 'not checked'),
     stackItem('Rate Limit', health.rate_limit ? `${health.rate_limit.requests}/${health.rate_limit.window_seconds}s` : 'not returned'),
     stackItem('Stored Accounts', String(accounts.length)),
     ...accounts.map((account) => accountItem(account))
@@ -1450,14 +1528,14 @@ function exchangeCard(name, integration) {
   return `<div class="exchange-card">
     <h3>${esc(title(name))}<span class="pill ${statusClass}">${esc(status)}</span></h3>
     ${stackItem('REST Status', rest)}
-    ${stackItem('WebSocket Status', ws)}
-    ${stackItem('Private WS Status', privateWs)}
+    ${stackItem('Market Stream Status', ws)}
+    ${stackItem('Account Stream Status', privateWs)}
     ${stackItem('API Key', account?.api_key_masked || 'not configured')}
     ${stackItem('Last Successful Test', account?.last_success_at || 'never')}
     ${stackItem('Last Failure', account?.last_failure_at || 'none')}
     ${stackItem('Last Error', account?.last_error_message || 'none')}
     ${stackItem('Portfolio Value', money(balancePayload.portfolio_value || 0))}
-    ${stackItem('Inventory Ratio', `${num((balancePayload.inventory_ratio || 0) * 100)}%`)}
+    ${stackItem('Token Balance %', `${num((balancePayload.inventory_ratio || 0) * 100)}%`)}
     ${balances.length ? `<div class="metric-stack">${balances.slice(0, 6).map((item) => stackItem(item.asset, `${num(item.available_balance)} available / ${num(item.locked_balance)} locked / ${num(item.total_balance)} total`)).join('')}</div>` : stackItem('Balances', balancePayload.error || 'No balances synced')}
     <div class="button-row">
       <button type="button" data-exchange="${esc(name)}" data-exchange-action="connect">Connect</button>
@@ -1547,6 +1625,18 @@ function coinstoreAccount() {
   return (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore')?.accounts?.[0] || null;
 }
 
+function selectedExchangeName() {
+  return String($('coinstore-form')?.exchange_name?.value || state.mmCampaign.exchange || 'coinstore').trim().toLowerCase();
+}
+
+function selectedExchangeIntegration() {
+  return (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === selectedExchangeName()) || null;
+}
+
+function selectedExchangeAccount() {
+  return selectedExchangeIntegration()?.accounts?.[0] || null;
+}
+
 function setChoiceActive(selector, activeButton) {
   document.querySelectorAll(selector).forEach((button) => {
     button.classList.toggle('active', button === activeButton);
@@ -1599,6 +1689,7 @@ function init() {
   $('api-base').value = state.apiBase;
   $('ws-url').value = state.wsUrl;
   $('bearer-token').value = state.token;
+  $('coinstore-form').exchange_name.value = state.mmCampaign.exchange || 'coinstore';
   $('save-token').addEventListener('click', () => {
     state.apiBase = normalizeApiBase($('api-base').value);
     state.token = normalizeToken($('bearer-token').value);
@@ -1639,6 +1730,13 @@ function init() {
     if (!button || button.disabled) return;
     applyTemplate(button.dataset.template);
   });
+  $('launch-stepper').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-launch-step]');
+    if (!button) return;
+    setLaunchStep(Number(button.dataset.launchStep));
+  });
+  document.querySelectorAll('[data-launch-next]').forEach((button) => button.addEventListener('click', () => setLaunchStep(state.launchStep + 1)));
+  document.querySelectorAll('[data-launch-prev]').forEach((button) => button.addEventListener('click', () => setLaunchStep(state.launchStep - 1)));
   $('recommendations-list').addEventListener('click', (event) => {
     const action = event.target.closest('[data-recommendation-action]');
     const card = event.target.closest('[data-recommendation]');
@@ -1658,6 +1756,15 @@ function init() {
   $('campaign-name').addEventListener('input', (event) => { state.mmCampaign.name = event.target.value; persistCampaign(); renderMarketMakingCampaign(); renderReadiness(); });
   $('mm-pair-select').addEventListener('change', (event) => { state.mmCampaign.pair = event.target.value; persistCampaign(); renderMarketMakingCampaign(); renderReadiness(); });
   $('mm-budget').addEventListener('input', (event) => { state.mmCampaign.budget = Number(event.target.value || 0); persistCampaign(); renderMarketMakingCampaign(); renderReadiness(); });
+  $('coinstore-form').exchange_name.addEventListener('change', (event) => { state.mmCampaign.exchange = event.target.value.trim().toLowerCase(); persistCampaign(); refreshExchangeBalances().then(renderAll); });
+  [['current-price', 'currentPrice'], ['price-floor', 'priceFloor'], ['price-ceiling', 'priceCeiling'], ['preferred-zone-min', 'preferredMin'], ['preferred-zone-max', 'preferredMax']].forEach(([id, key]) => {
+    $(id).addEventListener('input', (event) => {
+      state.mmCampaign[key] = Number(event.target.value || 0);
+      persistCampaign();
+      renderMarketMakingCampaign();
+      renderReadiness();
+    });
+  });
   document.querySelectorAll('[data-budget]').forEach((button) => button.addEventListener('click', () => {
     state.mmCampaign.budget = Number(button.dataset.budget || 0);
     $('mm-budget').value = String(state.mmCampaign.budget);

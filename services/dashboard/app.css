@@ -115,6 +115,24 @@ p { color: var(--muted); line-height: 1.55; }
 .template-card small, .readiness-item small, .onboarding-step small, .recommendation-card small { color: var(--muted); line-height: 1.45; }
 .campaign-section > span, .start-card > span { color: var(--primary); font-size: 0.75rem; font-weight: 850; text-transform: uppercase; letter-spacing: 0.08em; }
 .campaign-section, .start-card { display: grid; gap: 10px; align-content: start; }
+.launch-wizard-card { display: grid; gap: 18px; }
+.launch-stepper { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 8px; }
+.launch-step { padding: 10px 8px; border: 1px solid var(--border); color: var(--muted); background: #fff; box-shadow: none; font-size: 0.78rem; }
+.launch-step span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; margin-right: 6px; background: #E5E7EB; color: var(--muted); font-size: 0.72rem; }
+.launch-step.active { color: #fff; background: var(--primary); border-color: var(--primary); }
+.launch-step.active span { background: rgba(255,255,255,0.2); color: #fff; }
+.launch-step.complete:not(.active) { color: #065F46; background: var(--success-soft); border-color: #A7F3D0; }
+.launch-step.complete:not(.active) span { background: var(--success); color: #fff; }
+.wizard-step-panel { display: none; gap: 16px; }
+.wizard-step-panel.active { display: grid; }
+.compact-wizard-form { grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
+.wizard-footer { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.final-launch-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.monitor-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.compact-health { grid-template-columns: 1fr; }
+.compact-health article { border: 1px solid var(--border); border-radius: 14px; padding: 10px; background: #F9FAFB; }
+.secondary-monitor-section { padding: 0; }
+.secondary-monitor-section summary { color: var(--primary); }
 .readiness-score { display: flex; align-items: baseline; gap: 10px; }
 .readiness-score strong { font-size: 2.25rem; letter-spacing: -0.05em; }
 .choice-grid button.active, .monitor-tabs button.active { color: #fff; background: var(--primary); border-color: var(--primary); }
@@ -165,6 +183,6 @@ details > .settings-grid, details > .metric-stack, details > .emergency-grid, de
 .expert-mode .expert-only { display: block; }
 .event-log { min-height: 150px; max-height: 320px; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: #0F172A; color: #E5E7EB; white-space: pre-wrap; font-size: 0.78rem; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-@media (max-width: 1400px) { .kpi-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } .campaign-wizard, .monitoring-grid, .market-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 1080px) { .app-shell { grid-template-columns: 1fr; } .sidebar { position: static; height: auto; } .dashboard-grid, .exchange-layout, .monitoring-grid, .campaign-wizard, .market-health-grid { grid-template-columns: 1fr; } .topbar, .page-hero { flex-direction: column; align-items: stretch; } }
-@media (max-width: 720px) { .workspace { padding: 16px 12px 28px; } .kpi-strip, .status-grid, .balance-kpis, .risk-inventory-grid, .wizard-form, .market-ladder { grid-template-columns: 1fr; } .grid-tools { justify-content: flex-start; } table { min-width: 680px; } }
+@media (max-width: 1400px) { .kpi-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } .campaign-wizard, .monitoring-grid, .market-health-grid, .monitor-row, .final-launch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .launch-stepper { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 1080px) { .app-shell { grid-template-columns: 1fr; } .sidebar { position: static; height: auto; } .dashboard-grid, .exchange-layout, .monitoring-grid, .campaign-wizard, .market-health-grid, .monitor-row, .final-launch-grid { grid-template-columns: 1fr; } .topbar, .page-hero { flex-direction: column; align-items: stretch; } }
+@media (max-width: 720px) { .workspace { padding: 16px 12px 28px; } .kpi-strip, .status-grid, .balance-kpis, .risk-inventory-grid, .wizard-form, .market-ladder, .launch-stepper { grid-template-columns: 1fr; } .grid-tools { justify-content: flex-start; } table { min-width: 680px; } }
