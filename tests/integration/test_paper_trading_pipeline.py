@@ -1,6 +1,7 @@
 import asyncio
 import json
 import secrets
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -148,6 +149,74 @@ async def test_market_data_flow_normalizes_analyzes_publishes_and_persists():
         await database.close()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_market_data_startup_creates_configured_trading_pairs():
+    settings = _settings("redis://localhost:6379/0")
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session = database.session_factory()
+        runtime = MarketDataRuntime(settings, session, MemoryBus(), MarketDataEngine(default_runtime_config().liquidity), RuntimeMetrics())
+
+        async def noop_command_listener():
+            return None
+
+        runtime._start_command_listener = noop_command_listener
+        await runtime.ensure_started()
+        await session.commit()
+
+        pair = await session.scalar(
+            select(models.TradingPair).where(
+                models.TradingPair.exchange_name == "binance",
+                models.TradingPair.normalized_symbol == "BTC/USDT",
+            )
+        )
+        assert pair is not None
+        assert pair.venue_symbol == "BTCUSDT"
+        assert runtime.health()["configured_trading_pairs_validated"] is True
+        assert runtime.health()["configured_trading_pairs_count"] == 1
+        await session.close()
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_market_data_insert_recovers_from_stale_trading_pair_cache():
+    settings = _settings("redis://localhost:6379/0")
+    database = Database(settings)
+    try:
+        async with database.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session = database.session_factory()
+        runtime = MarketDataRuntime(settings, session, MemoryBus(), MarketDataEngine(default_runtime_config().liquidity), RuntimeMetrics())
+        runtime._pair_ids[("binance", "BTC/USDT")] = uuid.uuid4()
+
+        await runtime._insert_market_data(
+            exchange="binance",
+            symbol="BTC/USDT",
+            data_type="ticker",
+            source_timestamp=datetime.now(timezone.utc),
+            payload={"symbol": "BTC/USDT"},
+            bid_price=100000,
+            bid_size=1,
+            ask_price=100001,
+            ask_size=1,
+            last_price=100000.5,
+            volume_24h=None,
+        )
+        await session.commit()
+
+        trading_pair_count = await session.scalar(select(func.count()).select_from(models.TradingPair))
+        market_data_count = await session.scalar(select(func.count()).select_from(models.MarketData))
+        assert trading_pair_count == 1
+        assert market_data_count == 1
+        assert runtime.health()["market_data_rows_written"] == 1
+        await session.close()
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

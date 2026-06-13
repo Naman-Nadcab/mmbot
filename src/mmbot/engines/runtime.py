@@ -80,8 +80,7 @@ class EngineDaemon:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    if self.session is not None:
-                        await self.session.rollback()
+                    await self._rollback_session()
                     self.consecutive_errors += 1
                     self.last_error = f'{exc.__class__.__name__}: {exc}'
                     logger.exception(
@@ -92,7 +91,7 @@ class EngineDaemon:
                         },
                     )
                     await self._write_health('degraded')
-                    await self._publish_heartbeat(redis_ok=self.redis is not None, database_ok=False, status='degraded')
+                    await self._publish_heartbeat(redis_ok=self.redis is not None, database_ok=await self._database_ok_after_error(), status='degraded')
                     await self._wait_for_shutdown(min(30.0, max(1.0, self.consecutive_errors)))
         finally:
             await self._shutdown()
@@ -135,6 +134,21 @@ class EngineDaemon:
         if self.session is not None:
             await self.session.commit()
         await self._publish_heartbeat(redis_ok=redis_ok, database_ok=database_ok, status='healthy')
+
+    async def _rollback_session(self) -> None:
+        if self.session is not None:
+            await self.session.rollback()
+        rollback_handler = getattr(self.runtime, "handle_session_rollback", None)
+        if rollback_handler is not None:
+            rollback_handler()
+
+    async def _database_ok_after_error(self) -> bool:
+        if self.database is None:
+            return False
+        try:
+            return await self.database.health_check()
+        except Exception:
+            return False
 
     async def _publish_heartbeat(self, redis_ok: bool, database_ok: bool, status: str) -> None:
         if self.redis is None:

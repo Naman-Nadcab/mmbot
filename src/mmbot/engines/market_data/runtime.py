@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError, PendingRollbackError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mmbot.core.config import RuntimeConfig, Settings, default_runtime_config
@@ -267,10 +268,13 @@ class MarketDataRuntime:
         self._persist_counter = 0
         self._started = False
         self._pair_ids: dict[tuple[str, str], uuid.UUID] = {}
+        self.configured_trading_pairs_validated = False
+        self.configured_trading_pairs_count = 0
 
     async def ensure_started(self) -> None:
         if self._started:
             return
+        await self._validate_configured_trading_pairs()
         self._started = True
         if not self.settings.MARKET_DATA_CONNECT_ON_START:
             logger.info("market_data_connections_disabled", extra={"component_name": "market-data-engine"})
@@ -336,6 +340,8 @@ class MarketDataRuntime:
             "volatility_rows_written": self.volatility_rows_written,
             "last_db_insert_timestamp": self.last_db_insert_at.isoformat() if self.last_db_insert_at else None,
             "websocket_state": "active" if self.tasks and all(not task.done() for task in self.tasks) else "disabled",
+            "configured_trading_pairs_validated": self.configured_trading_pairs_validated,
+            "configured_trading_pairs_count": self.configured_trading_pairs_count,
             "metrics": self.metrics.snapshot(),
         }
 
@@ -401,6 +407,11 @@ class MarketDataRuntime:
             for stream in self.settings.MARKET_DATA_STREAMS:
                 subscriptions.append(StreamSubscription(venue=venue, symbol=symbol, kind=StreamKind(stream)))
         return subscriptions
+
+    def handle_session_rollback(self) -> None:
+        self._pair_ids.clear()
+        self.configured_trading_pairs_validated = False
+        self.configured_trading_pairs_count = 0
 
     async def _run_connector(self, connector: VenueWebSocketConnector, subscriptions: list[StreamSubscription]) -> None:
         async def handler(message: dict[str, Any]) -> None:
@@ -495,21 +506,96 @@ class MarketDataRuntime:
         logger.info("REDIS_PUBLISH_SUCCESS", extra={"channel": channel, "redis_publish_success": self.redis_publish_success_count, "publish_count": self.redis_publish_count})
         logger.info("redis_publish_success", extra={"channel": channel, "publish_count": self.redis_publish_count})
 
+    async def _validate_configured_trading_pairs(self) -> None:
+        if self.session is None:
+            return
+        count = 0
+        for exchange in self.settings.MARKET_DATA_EXCHANGES:
+            for symbol in self.settings.MARKET_DATA_SYMBOLS:
+                await self._ensure_trading_pair(exchange, symbol)
+                count += 1
+        self.configured_trading_pairs_validated = True
+        self.configured_trading_pairs_count = count
+        logger.info(
+            "market_data_trading_pairs_validated",
+            extra={
+                "exchange_count": len(self.settings.MARKET_DATA_EXCHANGES),
+                "symbol_count": len(self.settings.MARKET_DATA_SYMBOLS),
+                "trading_pair_count": count,
+            },
+        )
+
     async def _ensure_trading_pair(self, exchange: str, symbol: str) -> uuid.UUID | None:
         if self.session is None:
             return None
-        key = (exchange, symbol)
-        if key in self._pair_ids:
-            return self._pair_ids[key]
-        result = await self.session.execute(select(models.TradingPair).where(models.TradingPair.exchange_name == exchange, models.TradingPair.normalized_symbol == symbol))
-        row = result.scalar_one_or_none()
+        exchange_key = self._normalize_exchange(exchange)
+        normalized_symbol = self._normalize_trading_symbol(symbol)
+        base, quote = normalized_symbol.split("/", 1)
+        venue_symbol = normalized_symbol.replace("/", "")
+        key = (exchange_key, normalized_symbol)
+        if not self.session.is_active:
+            await self.session.rollback()
+            self.handle_session_rollback()
+        cached_id = self._pair_ids.get(key)
+        if cached_id is not None:
+            try:
+                if await self.session.get(models.TradingPair, cached_id) is not None:
+                    return cached_id
+            except PendingRollbackError:
+                await self.session.rollback()
+                self.handle_session_rollback()
+            else:
+                self._pair_ids.pop(key, None)
+        row = await self._find_trading_pair(exchange_key, normalized_symbol, venue_symbol)
         if row is None:
-            base, quote = symbol.split("/", 1)
-            row = models.TradingPair(exchange_name=exchange, base_asset=base, quote_asset=quote, normalized_symbol=symbol, venue_symbol=symbol.replace("/", ""), price_precision=8, quantity_precision=8, is_enabled=True)
-            self.session.add(row)
-            await self.session.flush()
+            row = models.TradingPair(
+                exchange_name=exchange_key,
+                base_asset=base,
+                quote_asset=quote,
+                normalized_symbol=normalized_symbol,
+                venue_symbol=venue_symbol,
+                price_precision=8,
+                quantity_precision=8,
+                is_enabled=True,
+            )
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(row)
+                    await self.session.flush()
+            except IntegrityError:
+                self._pair_ids.pop(key, None)
+                row = await self._find_trading_pair(exchange_key, normalized_symbol, venue_symbol)
+                if row is None:
+                    raise
         self._pair_ids[key] = row.id
         return row.id
+
+    async def _find_trading_pair(self, exchange: str, normalized_symbol: str, venue_symbol: str) -> models.TradingPair | None:
+        result = await self.session.execute(
+            select(models.TradingPair).where(
+                models.TradingPair.exchange_name == exchange,
+                or_(
+                    models.TradingPair.venue_symbol == venue_symbol,
+                    models.TradingPair.normalized_symbol == normalized_symbol,
+                ),
+            )
+        )
+        return result.scalars().first()
+
+    def _normalize_exchange(self, exchange: str) -> str:
+        normalized = str(exchange).strip().lower()
+        if not normalized:
+            raise ValueError("exchange name is required")
+        return normalized
+
+    def _normalize_trading_symbol(self, symbol: str) -> str:
+        normalized = str(symbol).strip().upper()
+        if "/" not in normalized:
+            raise ValueError(f"configured trading symbol must use BASE/QUOTE format: {symbol}")
+        base, quote = (part.strip() for part in normalized.split("/", 1))
+        if not base or not quote:
+            raise ValueError(f"configured trading symbol must include base and quote assets: {symbol}")
+        return f"{base}/{quote}"
 
     async def _maybe_persist_ticker(self, ticker: Ticker) -> None:
         self._persist_counter += 1
