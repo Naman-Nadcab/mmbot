@@ -1,8 +1,9 @@
 const pages = [
-  ['overview', 'Overview'],
-  ['inventory-risk', 'Inventory & Risk'],
-  ['coinstore', 'Coinstore'],
-  ['emergency', 'Danger Zone']
+  ['dashboard', 'Dashboard'],
+  ['exchange', 'Exchange'],
+  ['market-making', 'Market Making'],
+  ['monitoring', 'Monitoring'],
+  ['settings', 'Settings']
 ];
 
 const configDomains = {
@@ -41,6 +42,8 @@ const state = {
 };
 state.orderSort = { key: 'created_at', direction: 'desc' };
 state.lastConnectionTest = null;
+state.monitorTab = 'open-orders';
+state.mmCampaign = { pair: 'BTC/USDT', budget: 1000, strategy: 'balanced', spread: 'Normal', inventoryTarget: 0.5 };
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -139,12 +142,11 @@ function validateRequired(form, names) {
 }
 
 function initNav() {
-  $('main-nav').innerHTML = pages.map(([id, label]) => `<button type="button" class="nav-tab ${id === 'overview' ? 'active' : ''}" data-page="${id}">${label}</button>`).join('');
+  $('main-nav').innerHTML = pages.map(([id, label]) => `<button type="button" class="nav-tab ${id === 'dashboard' ? 'active' : ''}" data-page="${id}">${label}</button>`).join('');
   $('main-nav').addEventListener('click', (event) => {
     const button = event.target.closest('[data-page]');
     if (!button) return;
-    document.querySelectorAll('.nav-tab').forEach((item) => item.classList.toggle('active', item === button));
-    document.querySelectorAll('.page').forEach((item) => item.classList.toggle('active', item.id === `page-${button.dataset.page}`));
+    switchPage(button.dataset.page);
   });
 }
 
@@ -305,6 +307,11 @@ async function refreshRuntimeEvents() {
   }
 }
 
+function switchPage(id) {
+  document.querySelectorAll('.nav-tab').forEach((item) => item.classList.toggle('active', item.dataset.page === id));
+  document.querySelectorAll('.page').forEach((item) => item.classList.toggle('active', item.id === `page-${id}`));
+}
+
 function connectWebSocket() {
   disconnectWebSocket();
   state.manualDisconnect = false;
@@ -395,7 +402,7 @@ function initCoinstore() {
       form.passphrase.value = '';
       logEvent('exchange_account_saved', { id: saved.id, exchange: saved.exchange_name, alias: saved.account_alias });
       await refreshCoinstore();
-      renderCoinstore();
+      renderAll();
     } catch (error) {
       validationError(form, error.message);
       logEvent('coinstore_account_save_failed', { error: error.message });
@@ -407,7 +414,7 @@ function initCoinstore() {
     try {
       setPending('coinstore:health', true, event.target);
       await refreshCoinstore();
-      renderCoinstore();
+      renderAll();
     } finally {
       setPending('coinstore:health', false, event.target);
     }
@@ -426,9 +433,21 @@ function initCoinstore() {
       logEvent('coinstore_balance_sync', result);
       await refreshCoinstore();
       await refreshOperations();
+      renderAll();
     } finally {
       setPending('coinstore:sync', false, event.target);
     }
+  });
+  $('coinstore-test-current').addEventListener('click', async (event) => {
+    const form = $('coinstore-form');
+    const integration = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === form.exchange_name.value.trim().toLowerCase());
+    const account = integration?.accounts?.find((item) => item.account_alias === form.account_alias.value.trim() && item.environment === form.environment.value) || integration?.accounts?.[0];
+    if (!account) {
+      validationError(form, 'Save this exchange account before testing the connection.', ['api_key', 'api_secret']);
+      return;
+    }
+    await testExchangeAccount(account, event.target);
+    renderAll();
   });
 }
 
@@ -578,7 +597,6 @@ async function sendStrategy(command) {
 }
 
 function renderAll() {
-  renderQuickStartWizard();
   renderGlobalStatus();
   renderPnl();
   renderInventory();
@@ -596,6 +614,11 @@ function renderAll() {
   renderLiveMarketData();
   renderMarketMakerStatus();
   renderInventoryManagement();
+  renderDashboardSummary();
+  renderActivityTimeline();
+  renderMarketMakingCampaign();
+  renderMonitoringSummary();
+  renderRiskInventoryUx();
   renderRuntimeAckState();
 }
 
@@ -648,9 +671,7 @@ function renderCoinstoreCompact() {
   const health = state.data.coinstore.health || {};
   const balancesPayload = state.data.exchangeBalances?.coinstore || {};
   const balances = balancesPayload.balances || [];
-  setText('summary-exchange', 'Coinstore');
-  setText('summary-account', account?.account_alias || 'No account');
-  setText('summary-environment', account?.environment || '-');
+  setText('summary-connection', simpleStatus(account?.connection_status || health.rest?.status || 'Disconnected'));
   setText('summary-rest', account?.rest_status || health.rest?.status || 'Unknown');
   setText('summary-rest-sub', account?.last_success_at || health.rest?.error || 'No test');
   setText('summary-ws', account?.websocket_status || health.websocket?.status || 'Unknown');
@@ -666,6 +687,10 @@ function renderCoinstoreCompact() {
   }
   const compact = $('coinstore-compact-balances');
   if (compact) compact.innerHTML = balances.length ? balances.slice(0, 4).map((item) => stackItem(item.asset, `${num(item.available_balance)} available / ${num(item.total_balance)} total`)).join('') : stackItem('Balances', balancesPayload.error || 'No balances synced');
+  const availableTotal = balances.reduce((total, item) => total + Number(item.available_balance || 0) * Number(item.valuation_price || 1), 0);
+  const lockedTotal = balances.reduce((total, item) => total + Number(item.locked_balance || item.reserved_balance || 0) * Number(item.valuation_price || 1), 0);
+  setText('available-balance-total', money(availableTotal));
+  setText('locked-balance-total', money(lockedTotal));
   const results = $('connection-test-results');
   if (results) {
     results.innerHTML = [
@@ -676,6 +701,105 @@ function renderCoinstoreCompact() {
       stackItem('API Key', account?.api_key_masked || 'not configured'),
       stackItem('Last Success', account?.last_success_at || 'never'),
       stackItem('Last Failure', account?.last_failure_at || 'none')
+    ].join('');
+  }
+}
+
+function renderDashboardSummary() {
+  const integration = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore');
+  const account = integration?.accounts?.[0];
+  const maker = state.data.engines?.['market-maker-engine'] || {};
+  const makerRuntime = maker.runtime || {};
+  const exchangeStatus = account?.connection_status || integration?.status || state.data.coinstore.health?.rest?.status || 'Disconnected';
+  setText('dashboard-exchange-status', simpleStatus(exchangeStatus));
+  setText('dashboard-exchange-subtitle', account ? `${account.account_alias} / ${account.environment}` : 'Coinstore');
+  setText('dashboard-mm-status', makerRuntime.trading_enabled === false ? 'Paused' : simpleStatus(maker.status || makerRuntime.mode || 'Unknown'));
+  setText('dashboard-mm-subtitle', makerRuntime.mode || 'Runtime');
+  setHealth('health-api', 'health-api-dot', state.data.infrastructure?.api || 'checking');
+  setHealth('health-exchange', 'health-exchange-dot', exchangeStatus);
+  setHealth('health-market-data', 'health-market-data-dot', state.data.engines?.['market-data-engine']?.status || 'checking');
+  setHealth('health-market-maker', 'health-market-maker-dot', maker.status || 'checking');
+}
+
+function renderActivityTimeline() {
+  const items = [];
+  const account = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore')?.accounts?.[0];
+  if (account?.last_success_at) items.push(['Exchange Connected', `Coinstore ${account.account_alias}`, account.last_success_at]);
+  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  if (balances.length) items.push(['Balances Synced', `${balances.length} assets available`, state.data.exchangeBalances?.coinstore?.as_of || 'Latest sync']);
+  const runtime = state.data.engines?.['market-maker-engine']?.runtime || {};
+  if (runtime.trading_enabled !== false && state.data.engines?.['market-maker-engine']) items.push(['Market Making Started', runtime.mode || 'Runtime active', state.data.engines?.['market-maker-engine']?.last_heartbeat_at || 'Latest heartbeat']);
+  for (const trade of (state.data.trades || []).slice(0, 2)) items.push(['Order Filled', `${trade.side || ''} ${trade.symbol || ''} ${num(trade.quantity)} @ ${num(trade.price)}`, trade.created_at || trade.traded_at || '']);
+  for (const order of (state.data.orders || []).filter((item) => String(item.status).toLowerCase().includes('cancel')).slice(0, 2)) items.push(['Order Cancelled', order.client_order_id || order.exchange_order_id || order.id, order.created_at || '']);
+  for (const event of (state.data.runtimeEvents || []).slice(0, 4)) items.push([title(event.event_type || 'Runtime Event'), event.status || event.source_component || 'Runtime', event.created_at || event.acknowledged_at || '']);
+  const target = $('activity-timeline');
+  if (!target) return;
+  target.innerHTML = items.length ? items.slice(0, 8).map(([name, detail, time]) => `<div class="timeline-item"><span class="timeline-icon">${esc(String(name).slice(0, 1))}</span><div><strong>${esc(name)}</strong><p>${esc(detail || '')}</p><small>${esc(time || '')}</small></div></div>`).join('') : `<div class="empty">No recent backend activity returned</div>`;
+}
+
+function renderMarketMakingCampaign() {
+  const review = $('mm-review');
+  if (review) {
+    review.innerHTML = [
+      stackItem('Trading Pair', state.mmCampaign.pair),
+      stackItem('Budget', money(state.mmCampaign.budget)),
+      stackItem('Strategy', title(state.mmCampaign.strategy)),
+      stackItem('Spread', state.mmCampaign.spread),
+      stackItem('Inventory Target', `${num(state.mmCampaign.inventoryTarget * 100)}%`)
+    ].join('');
+  }
+  const pair = $('mm-pair-select');
+  if (pair && pair.value !== state.mmCampaign.pair) pair.value = state.mmCampaign.pair;
+}
+
+function renderMonitoringSummary() {
+  const lifecycle = orderLifecycle();
+  const analytics = $('analytics-summary');
+  if (analytics) {
+    analytics.innerHTML = [
+      stackItem('Active Orders', lifecycle.open_orders_count ?? state.data.orders.length ?? 0),
+      stackItem('Quote Refreshes', counter('market_maker.quote_refreshes') || counter('market_maker.quotes_generated') || 0),
+      stackItem('Reconciliation Runs', counter('reconciliation.runs') || 0),
+      stackItem('Risk Rejections Last Hour', lifecycle.risk_rejections_last_hour ?? 0)
+    ].join('');
+  }
+  const history = $('order-history-summary');
+  if (history) {
+    history.innerHTML = [
+      stackItem('Total Orders Loaded', (state.data.orders || []).length),
+      stackItem('Open Orders', lifecycle.open_orders_count ?? 0),
+      stackItem('Stale Orders', lifecycle.stale_orders_count ?? 0),
+      stackItem('Cancelled Orders', lifecycle.cancelled_orders_count ?? 0)
+    ].join('');
+  }
+}
+
+function renderRiskInventoryUx() {
+  const runtime = state.data.engines?.['market-maker-engine']?.runtime || {};
+  const inventoryConfig = runtime.runtime_config?.inventory || state.config.inventory || {};
+  const riskEvents = state.data.riskEvents || [];
+  const current = Number(state.data.exchangeBalances?.coinstore?.inventory_ratio || 0);
+  const target = Number(inventoryConfig.target_base_ratio || 0);
+  const deviation = (current - target) * 100;
+  const exposure = Number(state.data.inventory?.exposure_notional ?? state.data.inventory?.total_notional ?? 0);
+  const maxExposure = Number(inventoryConfig.max_asset_exposure || 0);
+  const usage = maxExposure > 0 ? Math.min(100, Math.max(0, exposure / maxExposure * 100)) : 0;
+  const riskScore = Math.min(100, Math.round(Math.abs(deviation) * 2 + usage * 0.45 + riskEvents.length * 5));
+  const health = riskScore >= 75 ? 'Critical' : riskScore >= 45 ? 'Warning' : 'Healthy';
+  setText('inventory-health-label', deviation > 1 ? 'Overweight' : deviation < -1 ? 'Underweight' : 'Balanced');
+  setText('target-inventory-ratio', `${num(target * 100)}%`);
+  setText('inventory-deviation', `${num(deviation)}%`);
+  setText('risk-score', String(riskScore));
+  setText('risk-score-label', health);
+  setText('exposure-usage-label', `${num(usage)}%`);
+  const exposureBar = $('exposure-usage-bar');
+  if (exposureBar) exposureBar.style.width = `${usage}%`;
+  const exposureDetail = $('exposure-usage-detail');
+  if (exposureDetail) {
+    exposureDetail.innerHTML = [
+      stackItem('Used', money(exposure)),
+      stackItem('Remaining', money(Math.max(0, maxExposure - exposure))),
+      stackItem('Maximum', money(maxExposure))
     ].join('');
   }
 }
@@ -707,6 +831,32 @@ function setStatusTile(id, subId, status, subtitle) {
   parent.className = `status-tile ${label === 'Connected' ? 'ok' : label === 'Warning' ? 'warn' : label === 'Failed' ? 'bad' : ''}`;
   el.textContent = label;
   if (sub) sub.textContent = subtitle || '';
+}
+
+function setHealth(textId, dotId, status) {
+  const label = simpleStatus(status);
+  setText(textId, label);
+  const dot = $(dotId);
+  if (!dot) return;
+  dot.className = `dot ${statusClass(status)}`;
+}
+
+function simpleStatus(status) {
+  const value = String(status || 'unknown').toLowerCase();
+  if (value.includes('healthy') || value.includes('connected') || value === 'ok') return 'Connected';
+  if (value.includes('testing')) return 'Testing';
+  if (value.includes('degraded') || value.includes('partial') || value.includes('warn')) return 'Warning';
+  if (value.includes('fail') || value.includes('error') || value.includes('invalid') || value.includes('unhealthy')) return 'Disconnected';
+  if (value.includes('paper') || value.includes('live') || value.includes('canary')) return title(value);
+  return title(value || 'unknown');
+}
+
+function statusClass(status) {
+  const label = simpleStatus(status).toLowerCase();
+  if (label.includes('connected') || label.includes('healthy') || label.includes('ok')) return 'ok';
+  if (label.includes('warning') || label.includes('testing')) return 'warn';
+  if (label.includes('disconnected') || label.includes('failed') || label.includes('active')) return 'bad';
+  return 'neutral';
 }
 
 function renderPnl() {
@@ -1020,6 +1170,13 @@ function isConnected(status) {
   return value.includes('connected') || value.includes('healthy') || value === 'ok';
 }
 
+function setChoiceActive(selector, activeButton) {
+  document.querySelectorAll(selector).forEach((button) => {
+    button.classList.toggle('active', button === activeButton);
+    button.classList.toggle('secondary', button !== activeButton);
+  });
+}
+
 function accountItem(account) {
   const next = account.is_enabled ? 'disable' : 'enable';
   return `<div class="stack-item"><b>${esc(account.account_alias)} ${esc(account.environment)}</b><span class="pill ${account.is_enabled ? 'ok' : 'neutral'}">${account.is_enabled ? 'enabled' : 'disabled'} key=${account.has_api_key} secret=${account.has_api_secret}</span><button type="button" class="ghost" data-account-id="${esc(account.id)}" data-account-status="${next}">${title(next)}</button></div>`;
@@ -1084,6 +1241,43 @@ function init() {
     } finally {
       setPending(`mm:${button.dataset.mmCommand}`, false, button);
     }
+  }));
+  $('mm-start-large').addEventListener('click', async (event) => {
+    try {
+      setPending('mm:start-large', true, event.target);
+      await sendStrategy('start');
+    } catch (error) {
+      logEvent('strategy_command_failed', { command: 'start', error: error.message });
+    } finally {
+      setPending('mm:start-large', false, event.target);
+    }
+  });
+  $('mm-pair-select').addEventListener('change', (event) => { state.mmCampaign.pair = event.target.value; renderMarketMakingCampaign(); });
+  $('mm-budget').addEventListener('input', (event) => { state.mmCampaign.budget = Number(event.target.value || 0); renderMarketMakingCampaign(); });
+  document.querySelectorAll('[data-budget]').forEach((button) => button.addEventListener('click', () => {
+    state.mmCampaign.budget = Number(button.dataset.budget || 0);
+    $('mm-budget').value = String(state.mmCampaign.budget);
+    setChoiceActive('[data-budget]', button);
+    renderMarketMakingCampaign();
+  }));
+  document.querySelectorAll('[data-strategy-choice]').forEach((button) => button.addEventListener('click', () => {
+    state.mmCampaign.strategy = button.dataset.strategyChoice;
+    setChoiceActive('[data-strategy-choice]', button);
+    renderMarketMakingCampaign();
+  }));
+  $('mm-spread-slider').addEventListener('input', (event) => {
+    state.mmCampaign.spread = ['Tight', 'Normal', 'Wide'][Number(event.target.value || 1)] || 'Normal';
+    renderMarketMakingCampaign();
+  });
+  document.querySelectorAll('[data-inventory-target]').forEach((button) => button.addEventListener('click', () => {
+    state.mmCampaign.inventoryTarget = Number(button.dataset.inventoryTarget || 0.5);
+    setChoiceActive('[data-inventory-target]', button);
+    renderMarketMakingCampaign();
+  }));
+  document.querySelectorAll('[data-monitor-tab]').forEach((button) => button.addEventListener('click', () => {
+    state.monitorTab = button.dataset.monitorTab;
+    document.querySelectorAll('[data-monitor-tab]').forEach((item) => item.classList.toggle('active', item === button));
+    document.querySelectorAll('.monitor-panel').forEach((panel) => panel.classList.toggle('active', panel.id === `monitor-${state.monitorTab}`));
   }));
   $('orders-prev').addEventListener('click', () => changePage('orders', -1));
   $('orders-next').addEventListener('click', () => changePage('orders', 1));
