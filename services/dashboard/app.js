@@ -1,15 +1,8 @@
 const pages = [
   ['overview', 'Overview'],
-  ['strategy', 'Strategy'],
-  ['spread', 'Spread'],
-  ['layers', 'Layers'],
-  ['order-size', 'Order Size'],
-  ['volume', 'Volume'],
-  ['liquidity', 'Liquidity'],
-  ['inventory', 'Inventory'],
-  ['risk', 'Risk'],
+  ['inventory-risk', 'Inventory & Risk'],
   ['coinstore', 'Coinstore'],
-  ['emergency', 'Emergency']
+  ['emergency', 'Danger Zone']
 ];
 
 const configDomains = {
@@ -108,6 +101,11 @@ function setPill(id, text, status = 'neutral') {
   if (!el) return;
   el.textContent = text;
   el.className = `status-chip ${status}`;
+}
+
+function setText(id, text) {
+  const el = $(id);
+  if (el) el.textContent = text;
 }
 
 function setPending(key, active, button) {
@@ -574,9 +572,13 @@ function renderOperatorEmergencyActions(actions) {
 async function sendStrategy(command) {
   const result = await request('/admin/strategy/command', { method: 'POST', body: JSON.stringify({ command, confirmation: command, reason: `operator ${command}` }) });
   logEvent('strategy_command', result.state);
+  await refreshRuntimeEvents();
+  await refreshOperations();
+  renderAll();
 }
 
 function renderAll() {
+  renderQuickStartWizard();
   renderGlobalStatus();
   renderPnl();
   renderInventory();
@@ -589,9 +591,93 @@ function renderAll() {
   renderExchanges();
   renderVolume();
   renderCoinstore();
+  renderCoinstoreCompact();
+  renderPremiumKpis();
+  renderLiveMarketData();
   renderMarketMakerStatus();
   renderInventoryManagement();
   renderRuntimeAckState();
+}
+
+function renderQuickStartWizard() {
+  const integrations = state.data.exchangeIntegrations || [];
+  const coinstore = integrations.find((item) => item.exchange_name === 'coinstore');
+  const account = coinstore?.accounts?.[0];
+  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  const makerRuntime = state.data.engines?.['market-maker-engine']?.runtime || {};
+  const kill = state.data.kill || {};
+  const steps = [
+    ['1', 'Connect Exchange', Boolean(account), account ? `${account.account_alias} / ${account.environment}` : 'Create or select a Coinstore account'],
+    ['2', 'Verify API', isConnected(account?.connection_status || account?.rest_status), account?.last_success_at || account?.last_error_message || 'Run connection test'],
+    ['3', 'Sync Balances', balances.length > 0, balances.length ? `${balances.length} assets synced` : 'Sync balances from exchange'],
+    ['4', 'Configure MM', Boolean(makerRuntime.runtime_config), makerRuntime.runtime_config ? `${makerRuntime.mode || 'runtime'} config loaded` : 'Load runtime configuration'],
+    ['5', 'Start Market Making', Boolean(makerRuntime.runtime_config) && makerRuntime.trading_enabled !== false && !kill.active, kill.active ? 'Kill switch active' : makerRuntime.trading_enabled === false ? 'Trading disabled' : makerRuntime.runtime_config ? 'Ready / active' : 'Waiting for runtime state']
+  ];
+  const target = $('wizard-steps');
+  if (!target) return;
+  target.innerHTML = steps.map(([number, label, complete, subtitle]) => `<article class="wizard-step ${complete ? 'ok' : 'warn'}"><span>Step ${number}</span><strong>${esc(label)}</strong><small>${esc(subtitle)}</small><span class="pill ${complete ? 'ok' : 'warn'}">${complete ? 'Complete' : 'Action Required'}</span></article>`).join('');
+}
+
+function renderPremiumKpis() {
+  const lifecycle = orderLifecycle();
+  const spread = currentSpreadBps();
+  const mid = currentMidPrice();
+  setText('current-spread-value', `${num(spread)} bps`);
+  setText('current-mid-value', `mid ${num(mid)}`);
+  setText('paper-fills-value', String(counter('paper.fills') || counter('market_maker.paper_fills') || 0));
+  setText('quote-refreshes-value', String(counter('market_maker.quote_refreshes') || counter('market_maker.quotes_generated') || 0));
+  setText('reconciliation-actions-count', String(lifecycle.reconciliation_actions ?? 0));
+}
+
+function renderLiveMarketData() {
+  const book = latestOrderbook();
+  const { bid, ask, depth, symbol } = bestBidAsk(book);
+  const mid = bid && ask ? (bid + ask) / 2 : currentMidPrice();
+  const spread = bid && ask && mid ? ((ask - bid) / mid) * 10000 : currentSpreadBps();
+  setText('market-data-symbol', symbol || book?.symbol || 'symbol');
+  setText('market-data-bid', num(bid));
+  setText('market-data-ask', num(ask));
+  setText('market-data-mid', num(mid));
+  setText('market-data-spread', `${num(spread)} bps`);
+  setText('market-data-depth', money(depth));
+}
+
+function renderCoinstoreCompact() {
+  const integration = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore');
+  const account = integration?.accounts?.[0];
+  const health = state.data.coinstore.health || {};
+  const balancesPayload = state.data.exchangeBalances?.coinstore || {};
+  const balances = balancesPayload.balances || [];
+  setText('summary-exchange', 'Coinstore');
+  setText('summary-account', account?.account_alias || 'No account');
+  setText('summary-environment', account?.environment || '-');
+  setText('summary-rest', account?.rest_status || health.rest?.status || 'Unknown');
+  setText('summary-rest-sub', account?.last_success_at || health.rest?.error || 'No test');
+  setText('summary-ws', account?.websocket_status || health.websocket?.status || 'Unknown');
+  setText('summary-private-ws', account?.private_ws_status || 'Unknown');
+  setText('summary-portfolio', money(balancesPayload.portfolio_value || 0));
+  setText('summary-sync', balances.length ? `${balances.length} assets synced` : balancesPayload.error || 'No sync');
+  const connectionStatus = account?.connection_status || health.rest?.status || 'not tested';
+  const connectionClass = isConnected(connectionStatus) ? 'ok' : String(connectionStatus).includes('error') || String(connectionStatus).includes('invalid') ? 'bad' : 'neutral';
+  const pill = $('connection-test-status');
+  if (pill) {
+    pill.textContent = connectionStatus;
+    pill.className = `pill ${connectionClass}`;
+  }
+  const compact = $('coinstore-compact-balances');
+  if (compact) compact.innerHTML = balances.length ? balances.slice(0, 4).map((item) => stackItem(item.asset, `${num(item.available_balance)} available / ${num(item.total_balance)} total`)).join('') : stackItem('Balances', balancesPayload.error || 'No balances synced');
+  const results = $('connection-test-results');
+  if (results) {
+    results.innerHTML = [
+      stackItem('Connection Status', connectionStatus),
+      stackItem('REST Status', account?.rest_status || health.rest?.status || 'not checked'),
+      stackItem('Public WebSocket', account?.websocket_status || health.websocket?.status || 'not checked'),
+      stackItem('Private WebSocket', account?.private_ws_status || 'not checked'),
+      stackItem('API Key', account?.api_key_masked || 'not configured'),
+      stackItem('Last Success', account?.last_success_at || 'never'),
+      stackItem('Last Failure', account?.last_failure_at || 'none')
+    ].join('');
+  }
 }
 
 function renderGlobalStatus() {
@@ -643,13 +729,22 @@ function renderInventory() {
 
 function renderOrders() {
   const lifecycle = orderLifecycle();
-  $('open-orders-count').textContent = String(lifecycle.open_orders_count ?? state.data.orders.length ?? 0);
-  $('stale-orders-count').textContent = String(lifecycle.stale_orders_count ?? 0);
-  $('cancelled-orders-count').textContent = String(lifecycle.cancelled_orders_count ?? 0);
-  $('reconciliation-actions-count').textContent = String(lifecycle.reconciliation_actions ?? 0);
+  setText('open-orders-count', String(lifecycle.open_orders_count ?? state.data.orders.length ?? 0));
+  setText('stale-orders-count', String(lifecycle.stale_orders_count ?? 0));
+  setText('cancelled-orders-count', String(lifecycle.cancelled_orders_count ?? 0));
+  setText('reconciliation-actions-count', String(lifecycle.reconciliation_actions ?? 0));
   const query = String($('orders-search')?.value || '').toLowerCase();
-  const filtered = (state.data.orders || []).filter((o) => !query || JSON.stringify(o).toLowerCase().includes(query));
+  const statusFilter = String($('orders-status-filter')?.value || '').toLowerCase();
+  const sideFilter = String($('orders-side-filter')?.value || '').toLowerCase();
+  const filtered = (state.data.orders || []).filter((o) => {
+    const status = String(o.status || '').toLowerCase();
+    const side = String(o.side || '').toLowerCase();
+    return (!query || JSON.stringify(o).toLowerCase().includes(query))
+      && (!statusFilter || status.includes(statusFilter))
+      && (!sideFilter || side === sideFilter);
+  });
   filtered.sort((a, b) => compareValues(a[state.orderSort.key], b[state.orderSort.key], state.orderSort.direction));
+  state.pagination.orders.page = Math.min(state.pagination.orders.page, pageCount(filtered, state.pagination.orders) - 1);
   const items = pageSlice(filtered, state.pagination.orders);
   $('orders-body').innerHTML = rows(items, 8, (o) => `<tr><td>${esc(o.exchange_order_id || o.client_order_id || o.id)}</td><td>${esc(exchangeFromOrder(o))}</td><td>${esc(o.side)}</td><td>${num(o.price)}</td><td>${num(o.quantity)}</td><td><span class="order-status ${esc(o.status)}">${esc(o.status)}</span></td><td>${orderAge(o.created_at)}</td><td>${esc(o.created_at || '')}</td></tr>`);
   $('orders-page').textContent = `${state.pagination.orders.page + 1}/${pageCount(filtered, state.pagination.orders)}`;
@@ -663,13 +758,24 @@ function renderTrades() {
 
 function renderRisk() {
   const risk = state.data.riskEvents || [];
-  $('risk-count').textContent = String(risk.length);
+  setText('risk-count', String(risk.length));
   $('risk-body').innerHTML = rows(risk, 4, (r) => `<tr><td>${esc(r.severity)}</td><td>${esc(r.event_type)}</td><td>${esc(r.message)}</td><td>${esc(r.occurred_at)}</td></tr>`);
   setPill('risk-summary', risk.length ? `${risk.length} risk events` : 'Risk normal', risk.some((r) => String(r.severity).includes('critical')) ? 'bad' : risk.length ? 'warn' : 'ok');
+  const config = state.data.engines?.['market-maker-engine']?.runtime?.runtime_config?.risk || state.config.risk || {};
+  const target = $('risk-limit-panel');
+  if (target) {
+    target.innerHTML = [
+      stackItem('Max Position Notional', money(config.max_position_notional || 0)),
+      stackItem('Max Total Exposure', money(config.max_total_exposure || 0)),
+      stackItem('Max Order Notional', money(config.max_order_notional || 0)),
+      stackItem('Max Open Orders', config.max_open_orders || 0),
+      stackItem('Circuit Breaker', config.circuit_breaker_enabled === false ? 'disabled' : 'enabled')
+    ].join('');
+  }
 }
 
 function renderAudit() {
-  $('audit-count').textContent = String((state.data.auditLogs || []).length);
+  setText('audit-count', String((state.data.auditLogs || []).length));
 }
 
 function renderEngines() {
@@ -734,8 +840,9 @@ function renderInventoryManagement() {
   ].join('');
   const bar = $('inventory-ratio-bar');
   if (bar) bar.style.width = `${Math.max(0, Math.min(100, current * 100))}%`;
-  $('portfolio-value').textContent = money(state.data.exchangeBalances?.coinstore?.portfolio_value || 0);
-  $('inventory-ratio-value').textContent = `${num(current * 100)}%`;
+  setText('portfolio-value', money(state.data.exchangeBalances?.coinstore?.portfolio_value || 0));
+  setText('inventory-ratio-value', `${num(current * 100)}%`);
+  setText('inventory-gauge-value', `${num(current * 100)}%`);
 }
 
 function orderLifecycle() {
@@ -840,17 +947,46 @@ function exchangeCard(name, integration) {
 }
 
 function currentSpreadBps() {
-  const analytics = state.data.engines?.['market-maker-engine']?.runtime?.latest_analytics || {};
-  return Number(Object.values(analytics)[0]?.spread?.spread_bps || 0);
+  const analytics = latestAnalytics();
+  const analyticSpread = Number(analytics?.spread?.spread_bps || analytics?.spread_bps || 0);
+  if (analyticSpread) return analyticSpread;
+  const { bid, ask } = bestBidAsk(latestOrderbook());
+  const mid = bid && ask ? (bid + ask) / 2 : 0;
+  return mid ? ((ask - bid) / mid) * 10000 : 0;
 }
 
 function currentMidPrice() {
-  const book = state.data.engines?.['market-maker-engine']?.runtime?.latest_orderbook || {};
-  const first = Object.values(book)[0];
-  if (!first?.bids?.length || !first?.asks?.length) return 0;
-  const bid = Math.max(...first.bids.map((item) => Number(item.price || 0)));
-  const ask = Math.min(...first.asks.map((item) => Number(item.price || 0)));
-  return (bid + ask) / 2;
+  const analytics = latestAnalytics();
+  const analyticMid = Number(analytics?.spread?.mid || analytics?.mid || 0);
+  if (analyticMid) return analyticMid;
+  const { bid, ask } = bestBidAsk(latestOrderbook());
+  return bid && ask ? (bid + ask) / 2 : 0;
+}
+
+function latestOrderbook() {
+  const makerBook = state.data.engines?.['market-maker-engine']?.runtime?.latest_orderbook || {};
+  const dataBook = state.data.engines?.['market-data-engine']?.runtime?.latest_orderbook || {};
+  return Object.values(makerBook)[0] || Object.values(dataBook)[0] || null;
+}
+
+function latestAnalytics() {
+  const makerAnalytics = state.data.engines?.['market-maker-engine']?.runtime?.latest_analytics || {};
+  const dataAnalytics = state.data.engines?.['market-data-engine']?.runtime?.latest_analytics || {};
+  return Object.values(makerAnalytics)[0] || Object.values(dataAnalytics)[0] || null;
+}
+
+function bestBidAsk(book) {
+  const bids = Array.isArray(book?.bids) ? book.bids.map(levelParts) : [];
+  const asks = Array.isArray(book?.asks) ? book.asks.map(levelParts) : [];
+  const bestBid = bids.reduce((best, item) => item.price > best.price ? item : best, { price: 0, size: 0 });
+  const bestAsk = asks.reduce((best, item) => !best.price || item.price < best.price ? item : best, { price: 0, size: 0 });
+  const depth = [...bids.slice(0, 5), ...asks.slice(0, 5)].reduce((total, item) => total + item.price * item.size, 0);
+  return { bid: bestBid.price, ask: bestAsk.price, bidSize: bestBid.size, askSize: bestAsk.size, depth, symbol: book?.symbol };
+}
+
+function levelParts(level) {
+  if (Array.isArray(level)) return { price: Number(level[0] || 0), size: Number(level[1] || 0) };
+  return { price: Number(level?.price || 0), size: Number(level?.size || level?.quantity || 0) };
 }
 
 function counter(name) {
@@ -877,6 +1013,11 @@ function compareValues(a, b, direction) {
   if (left < right) return direction === 'asc' ? -1 : 1;
   if (left > right) return direction === 'asc' ? 1 : -1;
   return 0;
+}
+
+function isConnected(status) {
+  const value = String(status || '').toLowerCase();
+  return value.includes('connected') || value.includes('healthy') || value === 'ok';
 }
 
 function accountItem(account) {
@@ -934,9 +1075,22 @@ function init() {
   $('refresh-now').addEventListener('click', refreshRest);
   $('connect-ws').addEventListener('click', connectWebSocket);
   $('disconnect-ws').addEventListener('click', disconnectWebSocket);
+  document.querySelectorAll('[data-mm-command]').forEach((button) => button.addEventListener('click', async () => {
+    try {
+      setPending(`mm:${button.dataset.mmCommand}`, true, button);
+      await sendStrategy(button.dataset.mmCommand);
+    } catch (error) {
+      logEvent('strategy_command_failed', { command: button.dataset.mmCommand, error: error.message });
+    } finally {
+      setPending(`mm:${button.dataset.mmCommand}`, false, button);
+    }
+  }));
   $('orders-prev').addEventListener('click', () => changePage('orders', -1));
   $('orders-next').addEventListener('click', () => changePage('orders', 1));
   $('orders-search').addEventListener('input', () => { state.pagination.orders.page = 0; renderOrders(); });
+  $('orders-status-filter').addEventListener('change', () => { state.pagination.orders.page = 0; renderOrders(); });
+  $('orders-side-filter').addEventListener('change', () => { state.pagination.orders.page = 0; renderOrders(); });
+  $('orders-page-size').addEventListener('change', (event) => { state.pagination.orders.page = 0; state.pagination.orders.size = Number(event.target.value || 50); renderOrders(); });
   document.querySelectorAll('[data-sort-orders]').forEach((header) => header.addEventListener('click', () => {
     const key = header.dataset.sortOrders;
     state.orderSort = { key, direction: state.orderSort.key === key && state.orderSort.direction === 'desc' ? 'asc' : 'desc' };

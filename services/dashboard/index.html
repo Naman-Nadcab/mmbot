@@ -8,17 +8,18 @@
   </head>
   <body>
     <main class="terminal-shell">
-      <section class="command-bar" aria-label="Executive status bar">
+      <section class="command-bar hero-status-bar" aria-label="Hero status bar">
         <div class="brand-block">
-          <span class="eyebrow">Institutional Coinstore MM</span>
-          <h1>Market Making Control Center</h1>
+          <span class="eyebrow">Institutional MM Terminal</span>
+          <h1>Operator Console</h1>
+          <p>Live market making operations, risk, inventory, and exchange control.</p>
         </div>
         <div class="command-chips">
+          <span id="exchange-summary" class="status-chip neutral">Exchange checking</span>
+          <span id="mode-pill" class="status-chip neutral">MM status unknown</span>
           <span id="api-status" class="status-chip neutral">API checking</span>
-          <span id="mode-pill" class="status-chip neutral">Mode unknown</span>
-          <span id="exchange-summary" class="status-chip neutral">Coinstore checking</span>
-          <span id="kill-status" class="status-chip neutral">Kill switch unknown</span>
           <span id="risk-summary" class="status-chip neutral">Risk loading</span>
+          <span id="kill-status" class="status-chip neutral">Kill switch unknown</span>
           <span id="ws-status" class="status-chip neutral pulse">WebSocket idle</span>
         </div>
       </section>
@@ -53,29 +54,86 @@
       <nav id="main-nav" class="nav-tabs" aria-label="Control center navigation"></nav>
 
       <section id="page-overview" class="page active">
-        <section class="kpi-strip operator-kpi-strip" aria-label="Trading KPIs">
-          <article class="kpi-card positive"><span>Portfolio Value</span><strong id="portfolio-value">$0.00</strong><small>Synced balances</small></article>
-          <article class="kpi-card"><span>Open Orders</span><strong id="open-orders-count">0</strong><small>Runtime active</small></article>
-          <article class="kpi-card"><span>Current Spread</span><strong id="current-spread-value">0 bps</strong><small id="current-mid-value">mid 0</small></article>
-          <article class="kpi-card"><span>Inventory Ratio</span><strong id="inventory-ratio-value">0%</strong><small>Current / target</small></article>
-          <article class="kpi-card"><span>24h Volume</span><strong id="daily-volume">$0.00</strong><small id="daily-volume-subtitle">target progress</small></article>
-          <article class="kpi-card"><span>Paper Fills</span><strong id="paper-fills-value">0</strong><small>Runtime fills</small></article>
-          <article class="kpi-card positive"><span>PnL</span><strong id="pnl-value">$0.00</strong><small id="pnl-subtitle">realized / unrealized</small><div id="pnl-chart" class="mini-chart"></div></article>
-          <article class="kpi-card"><span>Quote Refreshes</span><strong id="quote-refreshes-value">0</strong><small>Generated cycles</small></article>
+        <section class="quick-start glass-panel" aria-label="Quick start wizard">
+          <div class="section-heading">
+            <div><span class="eyebrow">Quick Start Wizard</span><h2>Operational Readiness Flow</h2></div>
+            <span class="muted">Uses live backend state only</span>
+          </div>
+          <div id="wizard-steps" class="wizard-steps"></div>
         </section>
 
-        <section class="operator-grid" aria-label="Operator panels">
-          <article class="glass-panel data-panel"><div class="panel-header"><h2>Market Maker Status</h2><span id="mm-status-mode" class="pill neutral">mode</span></div><div id="mm-status-panel" class="metric-stack"></div></article>
-          <article class="glass-panel data-panel"><div class="panel-header"><h2>Inventory Management</h2><span id="inventory-bias-pill" class="pill neutral">bias</span></div><div id="inventory-panel-live" class="metric-stack"></div><div class="ratio-bar"><span id="inventory-ratio-bar"></span></div></article>
-          <article class="glass-panel data-panel emergency-operator-card"><div class="panel-header"><h2>Emergency Action Center</h2><span class="pill bad">Confirmed</span></div><div id="operator-emergency-actions" class="button-row"></div></article>
+        <section class="kpi-strip premium-kpi-strip" aria-label="Premium trading KPIs">
+          <article class="kpi-card positive"><span>Portfolio Value</span><strong id="portfolio-value">$0.00</strong><small>Synced balances</small></article>
+          <article class="kpi-card"><span>Inventory Ratio</span><strong id="inventory-ratio-value">0%</strong><small>Current / target</small></article>
+          <article class="kpi-card"><span>Current Spread</span><strong id="current-spread-value">0 bps</strong><small id="current-mid-value">mid 0</small></article>
+          <article class="kpi-card"><span>Active Orders</span><strong id="open-orders-count">0</strong><small><span id="stale-orders-count">0</span> stale / <span id="cancelled-orders-count">0</span> cancelled</small></article>
+          <article class="kpi-card"><span>Daily Volume</span><strong id="daily-volume">$0.00</strong><small id="daily-volume-subtitle">target progress</small></article>
+          <article class="kpi-card positive"><span>PnL</span><strong id="pnl-value">$0.00</strong><small id="pnl-subtitle">realized / unrealized</small><div id="pnl-chart" class="mini-chart"></div></article>
+        </section>
+
+        <section class="terminal-grid" aria-label="Market making terminal">
+          <article class="glass-panel control-center">
+            <div class="panel-header"><div><span class="eyebrow">MM Control Center</span><h2>Market Making Runtime</h2></div><span id="mm-status-mode" class="pill neutral">mode</span></div>
+            <div class="mm-command-grid">
+              <button type="button" data-mm-command="start">Start MM</button>
+              <button type="button" class="secondary" data-mm-command="pause">Pause MM</button>
+              <button type="button" class="secondary" data-mm-command="resume">Resume MM</button>
+              <button type="button" class="danger-soft" data-mm-command="stop">Stop MM</button>
+            </div>
+            <div id="mm-status-panel" class="metric-stack"></div>
+          </article>
+
+          <article class="glass-panel market-data-panel">
+            <div class="panel-header"><div><span class="eyebrow">Live Market Data</span><h2>Top of Book</h2></div><span id="market-data-symbol" class="pill neutral">symbol</span></div>
+            <div class="market-ladder">
+              <div><span>Bid</span><strong id="market-data-bid">0</strong></div>
+              <div><span>Ask</span><strong id="market-data-ask">0</strong></div>
+              <div><span>Mid</span><strong id="market-data-mid">0</strong></div>
+              <div><span>Spread</span><strong id="market-data-spread">0 bps</strong></div>
+              <div><span>Depth</span><strong id="market-data-depth">$0.00</strong></div>
+            </div>
+          </article>
+
+          <article class="glass-panel coinstore-compact-panel">
+            <div class="panel-header"><div><span class="eyebrow">Exchange Integration</span><h2>Coinstore</h2></div><span id="connection-test-status" class="pill neutral">not tested</span></div>
+            <section class="compact-summary-grid" aria-label="Coinstore compact summary">
+              <article><span>Account</span><strong id="summary-account">No account</strong><small id="summary-exchange">Coinstore</small></article>
+              <article><span>Environment</span><strong id="summary-environment">-</strong><small>Account mode</small></article>
+              <article><span>REST</span><strong id="summary-rest">Unknown</strong><small id="summary-rest-sub">No test</small></article>
+              <article><span>Public WS</span><strong id="summary-ws">Unknown</strong><small>Market data</small></article>
+              <article><span>Private WS</span><strong id="summary-private-ws">Unknown</strong><small>Account stream</small></article>
+              <article><span>Portfolio</span><strong id="summary-portfolio">$0.00</strong><small id="summary-sync">No sync</small></article>
+            </section>
+            <div id="coinstore-compact-balances" class="metric-stack"></div>
+          </article>
+        </section>
+
+        <section class="orders-terminal glass-panel" aria-label="Institutional orders data grid">
+          <div class="panel-header">
+            <div><span class="eyebrow">Orders</span><h2>Institutional Data Grid</h2></div>
+            <div class="grid-tools">
+              <input id="orders-search" class="table-search" placeholder="Search orders" />
+              <select id="orders-status-filter" aria-label="Filter orders by status"><option value="">All statuses</option><option value="open">Open</option><option value="filled">Filled</option><option value="cancelled">Cancelled</option><option value="rejected">Rejected</option></select>
+              <select id="orders-side-filter" aria-label="Filter orders by side"><option value="">All sides</option><option value="buy">Buy</option><option value="sell">Sell</option></select>
+              <select id="orders-page-size" aria-label="Orders page size"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select>
+              <button id="orders-prev" class="ghost" type="button">Prev</button><span id="orders-page">1</span><button id="orders-next" class="ghost" type="button">Next</button>
+            </div>
+          </div>
+          <div class="table-wrap virtualized"><table><thead><tr><th data-sort-orders="client_order_id">Order ID</th><th>Exchange</th><th data-sort-orders="side">Side</th><th data-sort-orders="price">Price</th><th data-sort-orders="quantity">Size</th><th data-sort-orders="status">Status</th><th>Age</th><th data-sort-orders="created_at">Created At</th></tr></thead><tbody id="orders-body"></tbody></table></div>
+        </section>
+
+        <section class="advanced-settings glass-panel" aria-label="Advanced settings">
+          <div class="section-heading"><div><span class="eyebrow">Advanced Settings</span><h2>Strategy, Layers, Spread, Volume & Liquidity</h2></div><span class="muted">Runtime-controlled configuration</span></div>
+          <details><summary>Strategy</summary><div id="strategy-panel" class="settings-grid"></div></details>
+          <details><summary>Spread</summary><div id="spread-panel" class="settings-grid"></div></details>
+          <details><summary>Order Layers</summary><div id="order_layers-panel" class="settings-grid"></div></details>
+          <details><summary>Order Size</summary><div id="order_size-panel" class="settings-grid"></div></details>
+          <details><summary>Volume</summary><div id="volume-panel" class="settings-grid"></div><article class="nested-panel"><div class="panel-header"><h2>Volume Progress</h2></div><div id="volume-progress" class="metric-stack"></div></article></details>
+          <details><summary>Liquidity</summary><div id="liquidity-panel" class="settings-grid"></div></details>
         </section>
 
         <section class="live-ops-grid" aria-label="Live operations">
           <div class="ops-left">
-            <article class="glass-panel data-panel">
-              <div class="panel-header"><h2>Live Orders</h2><div class="pager"><input id="orders-search" class="table-search" placeholder="Search orders" /><button id="orders-prev" class="ghost" type="button">Prev</button><span id="orders-page">1</span><button id="orders-next" class="ghost" type="button">Next</button></div></div>
-              <div class="table-wrap virtualized"><table><thead><tr><th data-sort-orders="client_order_id">Order ID</th><th>Exchange</th><th data-sort-orders="side">Side</th><th data-sort-orders="price">Price</th><th data-sort-orders="quantity">Size</th><th data-sort-orders="status">Status</th><th>Age</th><th data-sort-orders="created_at">Created At</th></tr></thead><tbody id="orders-body"></tbody></table></div>
-            </article>
             <article class="glass-panel data-panel">
               <div class="panel-header"><h2>Trades Monitor</h2><div class="pager"><button id="trades-prev" class="ghost" type="button">Prev</button><span id="trades-page">1</span><button id="trades-next" class="ghost" type="button">Next</button></div></div>
               <div class="table-wrap virtualized"><table><thead><tr><th>Trade</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Fee</th></tr></thead><tbody id="trades-body"></tbody></table></div>
@@ -83,33 +141,36 @@
           </div>
           <div class="ops-right">
             <article class="glass-panel stack-panel"><div class="panel-header"><h2>Engine Health</h2><span id="engine-updated" class="muted">Polling REST</span></div><div id="engine-health" class="metric-stack"></div></article>
-            <article class="glass-panel stack-panel"><div class="panel-header"><h2>Infrastructure</h2></div><div id="infra-health" class="metric-stack"></div></article>
-            <article class="glass-panel stack-panel"><div class="panel-header"><h2>Runtime Events</h2></div><pre id="event-log" class="event-log"></pre><button id="clear-log" type="button" class="ghost">Clear</button></article>
+            <article class="glass-panel stack-panel"><div class="panel-header"><h2>Infrastructure</h2><span class="muted">Audits <b id="audit-count">0</b></span></div><div id="infra-health" class="metric-stack"></div></article>
+            <article class="glass-panel stack-panel"><div class="panel-header"><h2>Runtime Events</h2><span class="muted">Reconciliation <b id="reconciliation-actions-count">0</b></span></div><pre id="event-log" class="event-log"></pre><button id="clear-log" type="button" class="ghost">Clear</button></article>
           </div>
         </section>
+
+        <details class="danger-zone glass-panel">
+          <summary>Danger Zone: Emergency Actions</summary>
+          <div id="operator-emergency-actions" class="button-row"></div>
+        </details>
       </section>
 
-      <section id="page-strategy" class="page"><div id="strategy-panel" class="settings-grid"></div></section>
-      <section id="page-spread" class="page"><div id="spread-panel" class="settings-grid"></div></section>
-      <section id="page-layers" class="page"><div id="order_layers-panel" class="settings-grid"></div></section>
-      <section id="page-order-size" class="page"><div id="order_size-panel" class="settings-grid"></div></section>
-      <section id="page-volume" class="page"><div id="volume-panel" class="settings-grid"></div><article class="glass-panel data-panel"><div class="panel-header"><h2>Volume Progress</h2></div><div id="volume-progress" class="metric-stack"></div></article></section>
-      <section id="page-liquidity" class="page"><div id="liquidity-panel" class="settings-grid"></div></section>
-      <section id="page-inventory" class="page"><div id="inventory-panel" class="settings-grid"></div><article class="glass-panel data-panel"><div class="panel-header"><h2>Inventory Snapshots</h2></div><div id="inventory-detail" class="metric-stack"></div></article></section>
-      <section id="page-risk" class="page"><div id="risk-panel" class="settings-grid"></div><article class="glass-panel data-panel"><div class="panel-header"><h2>Risk Events</h2></div><div class="table-wrap console-table"><table><thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>Time</th></tr></thead><tbody id="risk-body"></tbody></table></div></article></section>
+      <section id="page-inventory-risk" class="page">
+        <section class="inventory-risk-grid">
+          <article class="glass-panel data-panel">
+            <div class="panel-header"><div><span class="eyebrow">Inventory & Risk</span><h2>Inventory Gauge</h2></div><span id="inventory-bias-pill" class="pill neutral">bias</span></div>
+            <div class="inventory-gauge"><div class="gauge-ring"><strong id="inventory-gauge-value">0%</strong><span>Inventory Ratio</span></div><div id="inventory-panel-live" class="metric-stack"></div></div>
+            <div class="ratio-bar"><span id="inventory-ratio-bar"></span></div>
+            <div class="mini-chart" id="inventory-chart"></div>
+            <div><span class="muted">Exposure</span> <strong id="inventory-exposure">$0.00</strong> <span id="inventory-subtitle" class="muted">0 snapshots</span></div>
+          </article>
+          <article class="glass-panel data-panel"><div class="panel-header"><h2>Risk Limits</h2><span class="muted">Events <b id="risk-count">0</b></span></div><div id="risk-panel" class="settings-grid"></div><div id="risk-limit-panel" class="metric-stack"></div></article>
+          <article class="glass-panel data-panel"><div class="panel-header"><h2>Inventory Snapshots</h2></div><div id="inventory-detail" class="metric-stack"></div></article>
+          <article class="glass-panel data-panel"><div class="panel-header"><h2>Risk Events</h2></div><div class="table-wrap console-table"><table><thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>Time</th></tr></thead><tbody id="risk-body"></tbody></table></div></article>
+        </section>
+      </section>
       <section id="page-coinstore" class="page">
         <div id="exchange-panel" class="settings-grid"></div>
         <article class="glass-panel data-panel">
           <div class="panel-header"><h2>Exchange Integration Center</h2><span class="muted">Secrets are write-only; API keys are masked after save</span></div>
-          <section class="coinstore-summary-grid" aria-label="Coinstore account summary">
-            <article class="summary-card"><span>Exchange</span><strong id="summary-exchange">Coinstore</strong><small id="summary-account">No account</small></article>
-            <article class="summary-card"><span>Environment</span><strong id="summary-environment">-</strong><small>Account mode</small></article>
-            <article class="summary-card"><span>REST</span><strong id="summary-rest">Unknown</strong><small id="summary-rest-sub">No test</small></article>
-            <article class="summary-card"><span>Public WS</span><strong id="summary-ws">Unknown</strong><small>Market data</small></article>
-            <article class="summary-card"><span>Private WS</span><strong id="summary-private-ws">Unknown</strong><small>Account stream</small></article>
-            <article class="summary-card"><span>Portfolio</span><strong id="summary-portfolio">$0.00</strong><small id="summary-sync">No sync</small></article>
-          </section>
-          <article class="glass-panel data-panel nested-panel"><div class="panel-header"><h2>Connection Test Results</h2><span id="connection-test-status" class="pill neutral">not tested</span></div><div id="connection-test-results" class="metric-stack"></div></article>
+          <article class="glass-panel data-panel nested-panel"><div class="panel-header"><h2>Connection Test Results</h2><span class="pill neutral">live backend</span></div><div id="connection-test-results" class="metric-stack"></div></article>
           <div id="exchange-cards" class="exchange-grid"></div>
           <form id="coinstore-form" class="form-grid">
             <label>Exchange<select name="exchange_name"><option>coinstore</option><option>mexc</option><option>gate</option><option>bitmart</option><option>kucoin</option><option>binance</option></select></label>
@@ -126,12 +187,12 @@
         </article>
       </section>
       <section id="page-emergency" class="page">
-        <article class="glass-panel data-panel">
-          <div class="panel-header"><h2>Emergency Operations Center</h2><span class="pill bad">Confirmed actions only</span></div>
+        <details class="danger-zone glass-panel" open>
+          <summary>Emergency Operations Center: Confirmed Actions Only</summary>
           <div id="emergency-actions" class="emergency-grid"></div>
           <div id="runtime-ack-state" class="metric-stack"></div>
           <pre id="kill-output" class="event-log"></pre>
-        </article>
+        </details>
       </section>
     </main>
     <script src="/app.js" defer></script>
