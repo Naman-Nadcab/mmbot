@@ -25,7 +25,7 @@
           <div>
             <span class="eyebrow">Professional SaaS Console</span>
             <h1>Coinstore Market Making Platform</h1>
-            <p>Connect an exchange, configure market making, and monitor daily operations from one business-friendly workspace.</p>
+            <p>Launch, monitor, and manage market making from a simplified client-first workspace.</p>
           </div>
           <div class="topbar-actions">
             <span id="exchange-summary" class="status-chip neutral">Exchange checking</span>
@@ -35,30 +35,88 @@
           </div>
         </header>
 
-        <section class="auth-panel card" aria-label="Connection controls">
-          <div class="form-grid compact">
-            <label>API Base<input id="api-base" value="/api" autocomplete="off" /></label>
-            <label>WebSocket URL<input id="ws-url" autocomplete="off" /></label>
-            <label>Operator JWT<input id="bearer-token" type="password" autocomplete="off" /></label>
-          </div>
-          <div class="button-row">
-            <button id="save-token" type="button">Save Token</button>
-            <button id="refresh-now" type="button" class="secondary">Refresh</button>
-            <button id="connect-ws" type="button" class="secondary">Connect WS</button>
-            <button id="disconnect-ws" type="button" class="ghost">Disconnect</button>
-          </div>
-          <div id="role-guidance" class="operator-guidance">Secure access is enforced by the backend. Use an authorized operator token to manage exchange, market making, risk, and emergency controls.</div>
-        </section>
+        <section id="page-launch-mm" class="page active">
+          <section class="page-hero card">
+            <div><span class="eyebrow">Launch MM</span><h2>Launch Market Making</h2><p>Connect Coinstore, add API credentials, choose a campaign template, review readiness, and start market making.</p></div>
+            <span id="mm-status-mode" class="status-chip neutral">mode</span>
+          </section>
 
-        <section id="page-dashboard" class="page active">
           <section id="onboarding-wizard" class="card onboarding-wizard">
-            <div class="section-heading">
-              <div><span class="eyebrow">First-Time Setup</span><h2>Launch market making in minutes</h2></div>
-              <span id="onboarding-score" class="status-chip neutral">0%</span>
-            </div>
+            <div class="section-heading"><div><span class="eyebrow">First-Time Setup</span><h2>Launch market making in minutes</h2></div><span id="onboarding-score" class="status-chip neutral">0%</span></div>
             <div class="progress-bar"><span id="onboarding-progress-bar"></span></div>
             <div id="onboarding-steps" class="onboarding-steps"></div>
             <div class="button-row"><button id="onboarding-resume" type="button">Resume Setup</button><button id="onboarding-later" type="button" class="ghost">Resume Later</button></div>
+          </section>
+
+          <section class="exchange-layout">
+            <article class="card connect-wizard">
+              <div class="section-heading"><div><span class="eyebrow">Connect Coinstore</span><h2>Exchange and API Credentials</h2></div><span id="connection-test-status" class="status-chip neutral">not tested</span></div>
+              <form id="coinstore-form" class="wizard-form">
+                <label><span>Step 1</span>Select Exchange<select name="exchange_name"><option>coinstore</option><option>mexc</option><option>gate</option><option>bitmart</option><option>kucoin</option><option>binance</option></select></label>
+                <label><span>Step 2</span>API Key<input name="api_key" type="password" autocomplete="off" /></label>
+                <label><span>Step 3</span>API Secret<input name="api_secret" type="password" autocomplete="off" /></label>
+                <label><span>Step 4</span>Passphrase (optional)<input name="passphrase" type="password" autocomplete="off" /></label>
+                <label>Account Alias<input name="account_alias" value="primary" autocomplete="off" /></label>
+                <label>Environment<select name="environment"><option>production</option><option>staging</option><option>sandbox</option></select></label>
+                <label class="hidden-field">Permissions<input name="permissions" value="read,trade" autocomplete="off" /></label>
+                <label class="hidden-field">Enabled<select name="is_enabled"><option value="true">true</option><option value="false">false</option></select></label>
+                <div class="wizard-actions"><button id="coinstore-test-current" type="button" class="secondary">Step 5: Test Connection</button><button type="submit">Step 6: Save</button><button id="coinstore-sync" type="button" class="secondary">Sync Balances</button><button id="coinstore-health" type="button" class="ghost">Refresh Status</button></div>
+              </form>
+            </article>
+
+            <article class="card">
+              <div class="section-heading"><div><span class="eyebrow">Connection Result</span><h2>Coinstore Status</h2></div></div>
+              <div class="status-grid simple-status">
+                <div><span>Connection</span><strong id="summary-connection">Disconnected</strong></div>
+                <div><span>REST</span><strong id="summary-rest">Unknown</strong><small id="summary-rest-sub">No test</small></div>
+                <div><span>WebSocket</span><strong id="summary-ws">Unknown</strong></div>
+                <div><span>Private WS</span><strong id="summary-private-ws">Unknown</strong></div>
+              </div>
+              <div id="connection-test-results" class="metric-stack"></div>
+            </article>
+
+            <article class="card balances-card">
+              <div class="section-heading"><div><span class="eyebrow">Balance Sync</span><h2>Portfolio</h2></div><span id="summary-sync" class="muted">No sync</span></div>
+              <div class="balance-kpis">
+                <div><span>Portfolio Value</span><strong id="summary-portfolio">$0.00</strong></div>
+                <div><span>Available USDT</span><strong id="available-usdt-balance">0</strong></div>
+                <div><span>Available Token</span><strong id="available-token-balance">0</strong></div>
+                <div><span>Locked Balance</span><strong id="locked-balance-total">$0.00</strong></div>
+                <div><span>Total Assets</span><strong id="total-assets-count">0</strong></div>
+              </div>
+              <div id="coinstore-compact-balances" class="metric-stack"></div>
+            </article>
+          </section>
+
+          <section class="card template-selector">
+            <div class="section-heading"><div><span class="eyebrow">Select Market Making Goal</span><h2>Choose a campaign template</h2></div></div>
+            <div id="template-cards" class="template-grid"></div>
+          </section>
+
+          <section class="campaign-wizard">
+            <article class="card campaign-section"><span>Campaign</span><h3>Campaign Name</h3><input id="campaign-name" value="TEX Market Making" autocomplete="off" /></article>
+            <article class="card campaign-section"><span>Pair</span><h3>Trading Pair</h3><select id="mm-pair-select"><option value="BTC/USDT">BTC/USDT</option><option value="ETH/USDT">ETH/USDT</option><option value="TEX/USDT">TEX/USDT</option></select></article>
+            <article class="card campaign-section"><span>Budget</span><h3>Budget</h3><div class="choice-grid" data-choice-group="budget"><button type="button" data-budget="1000">1,000 USDT</button><button type="button" data-budget="5000" class="secondary">5,000 USDT</button><button type="button" data-budget="10000" class="secondary">10,000 USDT</button></div><input id="mm-budget" type="number" min="0" step="100" value="1000" /></article>
+            <article class="card campaign-section"><span>Risk</span><h3>Risk Level</h3><div class="choice-grid" data-choice-group="risk"><button type="button" data-risk-level="low" class="secondary">Low</button><button type="button" data-risk-level="medium">Medium</button><button type="button" data-risk-level="high" class="secondary">High</button></div></article>
+            <article class="card campaign-section"><span>Volume</span><h3>Target Daily Volume</h3><div class="choice-grid" data-choice-group="volume"><button type="button" data-daily-volume="10000">10,000 USDT</button><button type="button" data-daily-volume="50000" class="secondary">50,000 USDT</button><button type="button" data-daily-volume="100000" class="secondary">100,000 USDT</button></div><input id="target-daily-volume" type="number" min="0" step="1000" value="10000" /></article>
+            <article class="card campaign-section review-card"><span>Review</span><h3>Campaign Review</h3><div id="mm-review" class="metric-stack"></div></article>
+            <article class="card campaign-section automatic-settings"><span>Automatic Settings</span><h3>Recommended Settings</h3><div id="automatic-settings-summary" class="metric-stack"></div><details><summary>Advanced Settings</summary><div id="campaign-advanced-settings" class="metric-stack"></div></details></article>
+            <article class="card readiness-card"><span>Launch Readiness</span><h3 id="readiness-title">Readiness Score</h3><div class="readiness-score"><strong id="readiness-score">0%</strong><span id="readiness-label">Needs Attention</span></div><div id="readiness-checklist" class="readiness-list"></div></article>
+            <article class="card start-card"><span>Launch</span><h3>Start Market Making</h3><p id="start-readiness-message">Start is available when critical checks pass.</p><button id="mm-start-large" type="button" class="primary-large">Start Market Making</button><div class="button-row"><button type="button" class="secondary" data-mm-command="pause">Pause</button><button type="button" class="secondary" data-mm-command="resume">Resume</button><button type="button" class="danger" data-mm-command="stop">Stop</button></div></article>
+          </section>
+        </section>
+
+        <section id="page-monitor-mm" class="page">
+          <section class="campaign-status-card card">
+            <div class="section-heading"><div><span class="eyebrow">Campaign Status</span><h2 id="campaign-status-name">Market Making Campaign</h2></div><span id="campaign-status-pill" class="status-chip neutral">Stopped</span></div>
+            <div class="campaign-status-grid">
+              <div><span>Exchange</span><strong id="campaign-status-exchange">Coinstore</strong></div>
+              <div><span>Pair</span><strong id="campaign-status-pair">BTC/USDT</strong></div>
+              <div><span>Budget</span><strong id="campaign-status-budget">$0.00</strong></div>
+              <div><span>Remaining Budget</span><strong id="campaign-status-remaining">$0.00</strong></div>
+              <div><span>Status</span><strong id="campaign-status-state">Stopped</strong></div>
+            </div>
+            <div class="button-row"><button type="button" data-mm-command="start">Start</button><button type="button" class="secondary" data-mm-command="pause">Pause</button><button type="button" class="secondary" data-mm-command="resume">Resume</button><button type="button" class="danger" data-mm-command="stop">Stop</button><button id="campaign-edit" type="button" class="ghost">Edit</button><button id="campaign-analytics" type="button" class="ghost">Analytics</button><button id="campaign-sync" type="button" class="secondary">Sync</button></div>
           </section>
 
           <section class="kpi-strip executive-kpis" aria-label="Executive KPIs">
@@ -70,172 +128,30 @@
             <article class="kpi-card"><span>Market Making Health</span><strong id="mm-health-value">Stopped</strong><small id="mm-score-label">Waiting for data</small></article>
           </section>
 
-          <section class="campaign-status-card card">
-            <div class="section-heading"><div><span class="eyebrow">Campaign Status</span><h2 id="campaign-status-name">Market Making Campaign</h2></div><span id="campaign-status-pill" class="status-chip neutral">Stopped</span></div>
-            <div class="campaign-status-grid">
-              <div><span>Exchange</span><strong id="campaign-status-exchange">Coinstore</strong></div>
-              <div><span>Pair</span><strong id="campaign-status-pair">BTC/USDT</strong></div>
-              <div><span>Budget</span><strong id="campaign-status-budget">$0.00</strong></div>
-              <div><span>Remaining Budget</span><strong id="campaign-status-remaining">$0.00</strong></div>
-              <div><span>Status</span><strong id="campaign-status-state">Stopped</strong></div>
-            </div>
-            <div class="button-row">
-              <button type="button" data-mm-command="start">Start</button>
-              <button type="button" class="secondary" data-mm-command="pause">Pause</button>
-              <button type="button" class="secondary" data-mm-command="resume">Resume</button>
-              <button type="button" class="danger" data-mm-command="stop">Stop</button>
-              <button id="campaign-edit" type="button" class="ghost">Edit</button>
-              <button id="campaign-analytics" type="button" class="ghost">Analytics</button>
-              <button id="campaign-sync" type="button" class="secondary">Sync</button>
-            </div>
-          </section>
-
-          <section class="dashboard-grid">
-            <article class="card">
-              <div class="section-heading"><div><span class="eyebrow">Recent Activity</span><h2>Timeline</h2></div><span id="last-refresh-at" class="muted">Never</span></div>
-              <div id="activity-timeline" class="timeline"></div>
-            </article>
-            <article class="card">
-              <div class="section-heading"><div><span class="eyebrow">System Health</span><h2>Summary</h2></div></div>
-              <div class="health-summary">
-                <div class="health-row"><span>API</span><strong id="health-api">Checking</strong><i id="health-api-dot" class="dot neutral"></i></div>
-                <div class="health-row"><span>Exchange</span><strong id="health-exchange">Checking</strong><i id="health-exchange-dot" class="dot neutral"></i></div>
-                <div class="health-row"><span>Market Data</span><strong id="health-market-data">Checking</strong><i id="health-market-data-dot" class="dot neutral"></i></div>
-                <div class="health-row"><span>Market Maker</span><strong id="health-market-maker">Checking</strong><i id="health-market-maker-dot" class="dot neutral"></i></div>
-              </div>
-            </article>
-            <article class="card recommendations-card">
-              <div class="section-heading"><div><span class="eyebrow">Smart Recommendations</span><h2>Suggested next steps</h2></div></div>
-              <div id="recommendations-list" class="recommendations-list"></div>
-            </article>
-          </section>
-        </section>
-
-        <section id="page-exchange" class="page">
-          <section class="page-hero card">
-            <div><span class="eyebrow">Exchange Setup</span><h2>Connect Coinstore Easily</h2><p>Follow the steps to connect, verify, and sync balances. Secrets remain write-only and masked after save.</p></div>
-            <span id="connection-test-status" class="status-chip neutral">not tested</span>
-          </section>
-
-          <section class="exchange-layout">
-            <article class="card connect-wizard">
-              <div class="section-heading"><div><span class="eyebrow">Connect Exchange Wizard</span><h2>Coinstore Credentials</h2></div></div>
-              <form id="coinstore-form" class="wizard-form">
-                <label><span>Step 1</span>Select Exchange<select name="exchange_name"><option>coinstore</option><option>mexc</option><option>gate</option><option>bitmart</option><option>kucoin</option><option>binance</option></select></label>
-                <label><span>Step 2</span>API Key<input name="api_key" type="password" autocomplete="off" /></label>
-                <label><span>Step 3</span>API Secret<input name="api_secret" type="password" autocomplete="off" /></label>
-                <label><span>Step 4</span>Passphrase (optional)<input name="passphrase" type="password" autocomplete="off" /></label>
-                <label>Account Alias<input name="account_alias" value="primary" autocomplete="off" /></label>
-                <label>Environment<select name="environment"><option>production</option><option>staging</option><option>sandbox</option></select></label>
-                <label class="hidden-field">Permissions<input name="permissions" value="read,trade" autocomplete="off" /></label>
-                <label class="hidden-field">Enabled<select name="is_enabled"><option value="true">true</option><option value="false">false</option></select></label>
-                <div class="wizard-actions">
-                  <button id="coinstore-test-current" type="button" class="secondary">Step 5: Test Connection</button>
-                  <button type="submit">Step 6: Save</button>
-                  <button id="coinstore-sync" type="button" class="secondary">Sync Balances</button>
-                  <button id="coinstore-health" type="button" class="ghost">Refresh Status</button>
-                </div>
-              </form>
-            </article>
-
-            <article class="card">
-              <div class="section-heading"><div><span class="eyebrow">Connection Status</span><h2>Coinstore</h2></div></div>
-              <div class="status-grid simple-status">
-                <div><span>Connection</span><strong id="summary-connection">Disconnected</strong></div>
-                <div><span>REST</span><strong id="summary-rest">Unknown</strong><small id="summary-rest-sub">No test</small></div>
-                <div><span>WebSocket</span><strong id="summary-ws">Unknown</strong></div>
-                <div><span>Private WS</span><strong id="summary-private-ws">Unknown</strong></div>
-              </div>
-              <div id="connection-test-results" class="metric-stack"></div>
-            </article>
-
-            <article class="card balances-card">
-              <div class="section-heading"><div><span class="eyebrow">Balances</span><h2>Portfolio</h2></div><span id="summary-sync" class="muted">No sync</span></div>
-              <div class="balance-kpis">
-                <div><span>Portfolio Value</span><strong id="summary-portfolio">$0.00</strong></div>
-                <div><span>Available USDT</span><strong id="available-usdt-balance">0</strong></div>
-                <div><span>Available Token</span><strong id="available-token-balance">0</strong></div>
-                <div><span>Locked Balance</span><strong id="locked-balance-total">$0.00</strong></div>
-                <div><span>Total Assets</span><strong id="total-assets-count">0</strong></div>
-              </div>
-              <div id="coinstore-compact-balances" class="metric-stack"></div>
-            </article>
-          </section>
-          <article class="card"><div class="section-heading"><div><span class="eyebrow">All Exchange Integrations</span><h2>Connected Accounts</h2></div></div><div id="exchange-cards" class="exchange-grid"></div><div id="coinstore-state" class="metric-stack"></div></article>
-        </section>
-
-        <section id="page-campaigns" class="page">
-          <section class="page-hero card">
-            <div><span class="eyebrow">Campaigns</span><h2>Create Market Making Campaign</h2><p>Create a client-friendly campaign. The automatic settings engine calculates spread, layers, quote size, inventory target, refresh rate, and risk limits.</p></div>
-            <span id="mm-status-mode" class="status-chip neutral">mode</span>
-          </section>
-          <section class="card template-selector">
-            <div class="section-heading"><div><span class="eyebrow">Select Market Making Goal</span><h2>Choose a campaign template</h2></div></div>
-            <div id="template-cards" class="template-grid"></div>
-          </section>
-          <section class="campaign-wizard">
-            <article class="card campaign-section"><span>Step 1</span><h3>Campaign Name</h3><input id="campaign-name" value="TEX Market Making" autocomplete="off" /></article>
-            <article class="card campaign-section"><span>Step 2</span><h3>Trading Pair</h3><select id="mm-pair-select"><option value="BTC/USDT">BTC/USDT</option><option value="ETH/USDT">ETH/USDT</option><option value="TEX/USDT">TEX/USDT</option></select></article>
-            <article class="card campaign-section"><span>Step 3</span><h3>Budget</h3><div class="choice-grid" data-choice-group="budget"><button type="button" data-budget="1000">1,000 USDT</button><button type="button" data-budget="5000" class="secondary">5,000 USDT</button><button type="button" data-budget="10000" class="secondary">10,000 USDT</button></div><input id="mm-budget" type="number" min="0" step="100" value="1000" /></article>
-            <article class="card campaign-section"><span>Step 4</span><h3>Risk Level</h3><div class="choice-grid" data-choice-group="risk"><button type="button" data-risk-level="low" class="secondary">Low</button><button type="button" data-risk-level="medium">Medium</button><button type="button" data-risk-level="high" class="secondary">High</button></div></article>
-            <article class="card campaign-section"><span>Step 5</span><h3>Target Daily Volume</h3><div class="choice-grid" data-choice-group="volume"><button type="button" data-daily-volume="10000">10,000 USDT</button><button type="button" data-daily-volume="50000" class="secondary">50,000 USDT</button><button type="button" data-daily-volume="100000" class="secondary">100,000 USDT</button></div><input id="target-daily-volume" type="number" min="0" step="1000" value="10000" /></article>
-            <article class="card campaign-section review-card"><span>Step 6</span><h3>Review</h3><div id="mm-review" class="metric-stack"></div></article>
-            <article class="card campaign-section automatic-settings"><span>Automatic Settings Engine</span><h3>Recommended Settings</h3><div id="automatic-settings-summary" class="metric-stack"></div><details><summary>Advanced Settings</summary><div id="campaign-advanced-settings" class="metric-stack"></div></details></article>
-            <article class="card readiness-card"><span>Launch Readiness</span><h3 id="readiness-title">Readiness Score</h3><div class="readiness-score"><strong id="readiness-score">0%</strong><span id="readiness-label">Needs Attention</span></div><div id="readiness-checklist" class="readiness-list"></div></article>
-            <article class="card start-card"><span>Step 7</span><h3>Start Market Making</h3><p id="start-readiness-message">Start is available when critical checks pass.</p><button id="mm-start-large" type="button" class="primary-large">Start Market Making</button><div class="button-row"><button type="button" class="secondary" data-mm-command="pause">Pause</button><button type="button" class="secondary" data-mm-command="resume">Resume</button><button type="button" class="danger" data-mm-command="stop">Stop</button></div></article>
-          </section>
-          <article class="card"><div class="section-heading"><div><span class="eyebrow">Runtime Status</span><h2>Market Maker</h2></div></div><div id="mm-status-panel" class="metric-stack"></div></article>
-        </section>
-
-        <section id="page-monitoring" class="page">
           <section class="monitoring-grid">
             <article class="card market-data-card"><div class="section-heading"><div><span class="eyebrow">Live Market Data</span><h2 id="market-data-symbol">Symbol</h2></div></div><div class="market-ladder"><div><span>Bid</span><strong id="market-data-bid">0</strong></div><div><span>Ask</span><strong id="market-data-ask">0</strong></div><div><span>Mid</span><strong id="market-data-mid">0</strong></div><div><span>Spread</span><strong id="market-data-spread">0 bps</strong></div></div></article>
             <article class="card"><div class="section-heading"><div><span class="eyebrow">Inventory Health</span><h2 id="inventory-health-label">Balanced</h2></div><span id="inventory-bias-pill" class="status-chip neutral">bias</span></div><div id="inventory-panel-live" class="metric-stack"></div></article>
             <article class="card"><div class="section-heading"><div><span class="eyebrow">Exposure Utilization</span><h2 id="exposure-usage-label">0%</h2></div></div><div class="progress-bar"><span id="exposure-usage-bar"></span></div><div id="exposure-usage-detail" class="metric-stack"></div></article>
           </section>
-          <section class="market-health-grid">
-            <article class="card"><span>Spread Quality</span><strong id="spread-quality">Waiting for data</strong></article>
-            <article class="card"><span>Liquidity Quality</span><strong id="liquidity-quality">Waiting for data</strong></article>
-            <article class="card"><span>Inventory Health</span><strong id="inventory-health-card">Balanced</strong></article>
-            <article class="card"><span>Volume Progress</span><strong id="volume-progress-status">Waiting for data</strong></article>
-          </section>
+
+          <section class="market-health-grid"><article class="card"><span>Spread Quality</span><strong id="spread-quality">Waiting for data</strong></article><article class="card"><span>Liquidity Quality</span><strong id="liquidity-quality">Waiting for data</strong></article><article class="card"><span>Inventory Health</span><strong id="inventory-health-card">Balanced</strong></article><article class="card"><span>Volume Progress</span><strong id="volume-progress-status">Waiting for data</strong></article></section>
 
           <article class="card orders-terminal">
             <div class="section-heading"><div><span class="eyebrow">Daily Operations</span><h2>Orders, Trades & Analytics</h2></div></div>
             <div class="monitor-tabs"><button type="button" class="tab-button active" data-monitor-tab="open-orders">Open Orders</button><button type="button" class="tab-button" data-monitor-tab="order-history">Order History</button><button type="button" class="tab-button" data-monitor-tab="trade-history">Trade History</button><button type="button" class="tab-button" data-monitor-tab="analytics">Analytics</button></div>
-            <div class="grid-tools">
-              <input id="orders-search" class="table-search" placeholder="Search orders" />
-              <select id="orders-status-filter"><option value="">All statuses</option><option value="open">Open</option><option value="filled">Filled</option><option value="cancelled">Cancelled</option><option value="rejected">Rejected</option></select>
-              <select id="orders-side-filter"><option value="">All sides</option><option value="buy">Buy</option><option value="sell">Sell</option></select>
-              <select id="orders-page-size"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select>
-              <button id="orders-prev" class="ghost" type="button">Prev</button><span id="orders-page">1</span><button id="orders-next" class="ghost" type="button">Next</button>
-            </div>
+            <div class="grid-tools"><input id="orders-search" class="table-search" placeholder="Search orders" /><select id="orders-status-filter"><option value="">All statuses</option><option value="open">Open</option><option value="filled">Filled</option><option value="cancelled">Cancelled</option><option value="rejected">Rejected</option></select><select id="orders-side-filter"><option value="">All sides</option><option value="buy">Buy</option><option value="sell">Sell</option></select><select id="orders-page-size"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select><button id="orders-prev" class="ghost" type="button">Prev</button><span id="orders-page">1</span><button id="orders-next" class="ghost" type="button">Next</button></div>
             <section id="monitor-open-orders" class="monitor-panel active"><div class="table-wrap virtualized"><table><thead><tr><th data-sort-orders="side">Side</th><th data-sort-orders="price">Price</th><th data-sort-orders="quantity">Size</th><th data-sort-orders="status">Status</th><th data-sort-orders="created_at">Created</th><th>Age</th></tr></thead><tbody id="orders-body"></tbody></table></div></section>
             <section id="monitor-order-history" class="monitor-panel"><div id="order-history-summary" class="metric-stack"></div></section>
             <section id="monitor-trade-history" class="monitor-panel"><div class="table-wrap virtualized"><table><thead><tr><th>Trade</th><th>Symbol</th><th>Side</th><th>Price</th><th>Qty</th><th>Fee</th></tr></thead><tbody id="trades-body"></tbody></table></div><div class="pager"><button id="trades-prev" class="ghost" type="button">Prev</button><span id="trades-page">1</span><button id="trades-next" class="ghost" type="button">Next</button></div></section>
             <section id="monitor-analytics" class="monitor-panel"><div id="analytics-summary" class="metric-stack"></div><div id="volume-progress" class="metric-stack"></div></section>
           </article>
+
+          <section class="dashboard-grid"><article class="card recommendations-card"><div class="section-heading"><div><span class="eyebrow">Smart Recommendations</span><h2>Suggested next steps</h2></div></div><div id="recommendations-list" class="recommendations-list"></div></article><article class="card"><div class="section-heading"><div><span class="eyebrow">Activity Feed</span><h2>Recent Activity</h2></div><span id="last-refresh-at" class="muted">Never</span></div><div id="activity-timeline" class="timeline"></div></article><article class="card"><div class="section-heading"><div><span class="eyebrow">System Status</span><h2>Summary</h2></div></div><div class="health-summary"><div class="health-row"><span>API</span><strong id="health-api">Checking</strong><i id="health-api-dot" class="dot neutral"></i></div><div class="health-row"><span>Exchange</span><strong id="health-exchange">Checking</strong><i id="health-exchange-dot" class="dot neutral"></i></div><div class="health-row"><span>Market Data</span><strong id="health-market-data">Checking</strong><i id="health-market-data-dot" class="dot neutral"></i></div><div class="health-row"><span>Market Maker</span><strong id="health-market-maker">Checking</strong><i id="health-market-maker-dot" class="dot neutral"></i></div></div></article></section>
         </section>
 
-        <section id="page-settings" class="page">
-          <section class="page-hero card"><div><span class="eyebrow">Settings</span><h2>Advanced Controls</h2><p>Technical strategy, spread, layer, liquidity, volume, risk, and emergency controls are collapsed by default.</p></div></section>
-          <section class="settings-accordion card">
-            <label class="expert-toggle"><input id="expert-mode-toggle" type="checkbox" /> Enable Expert Mode</label>
-            <p class="muted">Advanced technical controls are hidden until Expert Mode is enabled.</p>
-            <details class="expert-only"><summary>Strategy</summary><div id="strategy-panel" class="settings-grid"></div></details>
-            <details class="expert-only"><summary>Spread</summary><div id="spread-panel" class="settings-grid"></div></details>
-            <details class="expert-only"><summary>Layers</summary><div id="order_layers-panel" class="settings-grid"></div><div id="order_size-panel" class="settings-grid"></div></details>
-            <details class="expert-only"><summary>Liquidity</summary><div id="liquidity-panel" class="settings-grid"></div></details>
-            <details class="expert-only"><summary>Volume</summary><div id="volume-panel" class="settings-grid"></div></details>
-            <details class="expert-only"><summary>Risk</summary><div id="risk-panel" class="settings-grid"></div><div id="risk-limit-panel" class="metric-stack"></div></details>
-            <details class="danger-zone expert-only"><summary>Emergency</summary><div id="operator-emergency-actions" class="button-row"></div><div id="emergency-actions" class="emergency-grid"></div><div id="runtime-ack-state" class="metric-stack"></div><pre id="kill-output" class="event-log"></pre></details>
-            <details class="expert-only"><summary>Manual Configuration</summary><div id="exchange-panel" class="settings-grid"></div></details>
-          </section>
-          <section class="settings-grid secondary-settings">
-            <article class="card"><div class="section-heading"><h2>Risk & Inventory UX</h2></div><div class="risk-inventory-grid"><div><span>Current Ratio</span><strong id="inventory-ratio-value">0%</strong></div><div><span>Target Ratio</span><strong id="target-inventory-ratio">0%</strong></div><div><span>Deviation</span><strong id="inventory-deviation">0%</strong></div><div><span>Risk Score</span><strong id="risk-score">0</strong><small id="risk-score-label">Healthy</small></div></div><div class="progress-bar"><span id="inventory-ratio-bar"></span></div><div id="inventory-detail" class="metric-stack"></div></article>
-            <article class="card"><div class="section-heading"><h2>System Details</h2><span>Audits <b id="audit-count">0</b></span></div><div id="infra-health" class="metric-stack"></div><div id="engine-health" class="metric-stack"></div><pre id="event-log" class="event-log"></pre><button id="clear-log" type="button" class="ghost">Clear Activity Log</button></article>
-            <article class="card"><div class="section-heading"><h2>Risk Events</h2><span>Events <b id="risk-count">0</b></span></div><div class="table-wrap console-table"><table><thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>Time</th></tr></thead><tbody id="risk-body"></tbody></table></div></article>
-          </section>
+        <section id="page-advanced" class="page">
+          <section class="page-hero card"><div><span class="eyebrow">Advanced</span><h2>Expert Controls</h2><p>Technical settings, runtime diagnostics, infrastructure monitoring, and emergency controls are hidden until Expert Mode is enabled.</p></div></section>
+          <section class="settings-accordion card"><label class="expert-toggle"><input id="expert-mode-toggle" type="checkbox" /> Enable Expert Mode</label><p class="muted">Advanced technical controls are hidden until Expert Mode is enabled.</p><details class="expert-only"><summary>Connection and Operator Tools</summary><section class="auth-panel" aria-label="Connection controls"><div class="form-grid compact"><label>API Base<input id="api-base" value="/api" autocomplete="off" /></label><label>WebSocket URL<input id="ws-url" autocomplete="off" /></label><label>Operator JWT<input id="bearer-token" type="password" autocomplete="off" /></label></div><div class="button-row"><button id="save-token" type="button">Save Token</button><button id="refresh-now" type="button" class="secondary">Refresh</button><button id="connect-ws" type="button" class="secondary">Connect WS</button><button id="disconnect-ws" type="button" class="ghost">Disconnect</button></div><div id="role-guidance" class="operator-guidance">Secure access is enforced by the backend.</div></section></details><details class="expert-only"><summary>Strategy</summary><div id="strategy-panel" class="settings-grid"></div></details><details class="expert-only"><summary>Spread</summary><div id="spread-panel" class="settings-grid"></div></details><details class="expert-only"><summary>Layers</summary><div id="order_layers-panel" class="settings-grid"></div><div id="order_size-panel" class="settings-grid"></div></details><details class="expert-only"><summary>Liquidity</summary><div id="liquidity-panel" class="settings-grid"></div></details><details class="expert-only"><summary>Volume</summary><div id="volume-panel" class="settings-grid"></div></details><details class="expert-only"><summary>Inventory</summary><div class="risk-inventory-grid"><div><span>Current Ratio</span><strong id="inventory-ratio-value">0%</strong></div><div><span>Target Ratio</span><strong id="target-inventory-ratio">0%</strong></div><div><span>Deviation</span><strong id="inventory-deviation">0%</strong></div><div><span>Risk Score</span><strong id="risk-score">0</strong><small id="risk-score-label">Healthy</small></div></div><div class="progress-bar"><span id="inventory-ratio-bar"></span></div><div id="inventory-detail" class="metric-stack"></div></details><details class="expert-only"><summary>Risk</summary><div id="risk-panel" class="settings-grid"></div><div id="risk-limit-panel" class="metric-stack"></div></details><details class="danger-zone expert-only"><summary>Emergency</summary><div id="operator-emergency-actions" class="button-row"></div><div id="emergency-actions" class="emergency-grid"></div><div id="runtime-ack-state" class="metric-stack"></div><pre id="kill-output" class="event-log"></pre></details><details class="expert-only"><summary>Runtime Diagnostics</summary><div id="mm-status-panel" class="metric-stack"></div><div id="engine-health" class="metric-stack"></div><div id="infra-health" class="metric-stack"></div><pre id="event-log" class="event-log"></pre><button id="clear-log" type="button" class="ghost">Clear Activity Log</button></details><details class="expert-only"><summary>Infrastructure and Audit</summary><span>Audits <b id="audit-count">0</b></span><div class="table-wrap console-table"><table><thead><tr><th>Severity</th><th>Type</th><th>Message</th><th>Time</th></tr></thead><tbody id="risk-body"></tbody></table></div><span>Events <b id="risk-count">0</b></span></details><details class="expert-only"><summary>Exchange Runtime Settings</summary><div id="exchange-panel" class="settings-grid"></div><div id="exchange-cards" class="exchange-grid"></div><div id="coinstore-state" class="metric-stack"></div></details></section>
           <span id="pnl-value" class="visually-hidden">$0.00</span><span id="pnl-subtitle" class="visually-hidden">realized / unrealized</span><span id="pnl-chart" class="visually-hidden"></span><span id="current-spread-value" class="visually-hidden">0 bps</span><span id="current-mid-value" class="visually-hidden">mid 0</span><span id="stale-orders-count" class="visually-hidden">0</span><span id="cancelled-orders-count" class="visually-hidden">0</span><span id="reconciliation-actions-count" class="visually-hidden">0</span><span id="paper-fills-value" class="visually-hidden">0</span><span id="quote-refreshes-value" class="visually-hidden">0</span><span id="inventory-exposure" class="visually-hidden">$0.00</span><span id="inventory-subtitle" class="visually-hidden">0 snapshots</span><span id="inventory-chart" class="visually-hidden"></span>
         </section>
       </section>

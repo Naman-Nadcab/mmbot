@@ -1,9 +1,7 @@
 const pages = [
-  ['dashboard', 'Dashboard'],
-  ['exchange', 'Exchange'],
-  ['campaigns', 'Campaigns'],
-  ['monitoring', 'Monitoring'],
-  ['settings', 'Settings']
+  ['launch-mm', 'Launch MM'],
+  ['monitor-mm', 'Monitor MM'],
+  ['advanced', 'Advanced']
 ];
 
 const configDomains = {
@@ -214,7 +212,7 @@ function validateRequired(form, names) {
 }
 
 function initNav() {
-  $('main-nav').innerHTML = pages.map(([id, label]) => `<button type="button" class="nav-tab ${id === 'dashboard' ? 'active' : ''}" data-page="${id}">${label}</button>`).join('');
+  $('main-nav').innerHTML = pages.map(([id, label]) => `<button type="button" class="nav-tab ${id === 'launch-mm' ? 'active' : ''}" data-page="${id}">${label}</button>`).join('');
   $('main-nav').addEventListener('click', (event) => {
     const button = event.target.closest('[data-page]');
     if (!button) return;
@@ -1106,12 +1104,12 @@ function handleRecommendation(id, action) {
   if (item.type === 'sync') {
     $('coinstore-sync').click();
   } else if (item.type === 'review-settings') {
-    switchPage('settings');
+    switchPage('advanced');
     setExpertMode(true);
   } else if (item.type === 'review-campaign') {
-    switchPage('campaigns');
+    switchPage('launch-mm');
   } else {
-    switchPage('monitoring');
+    switchPage('monitor-mm');
   }
   if (action === 'apply' && id === 'volume-target') {
     state.mmCampaign.targetDailyVolume = Math.max(10000, Math.round(Number(state.mmCampaign.targetDailyVolume || 0) * 0.85));
@@ -1622,14 +1620,13 @@ function init() {
       setPending(`mm:${button.dataset.mmCommand}`, false, button);
     }
   }));
-  $('campaign-edit').addEventListener('click', () => switchPage('campaigns'));
-  $('campaign-analytics').addEventListener('click', () => switchPage('monitoring'));
+  $('campaign-edit').addEventListener('click', () => switchPage('launch-mm'));
+  $('campaign-analytics').addEventListener('click', () => switchPage('monitor-mm'));
   $('campaign-sync').addEventListener('click', () => $('coinstore-sync').click());
   $('onboarding-resume').addEventListener('click', () => {
     state.onboardingResumeLater = false;
     localStorage.setItem('ops.onboardingResumeLater', 'false');
-    const firstIncomplete = onboardingSteps().find((step) => !step.complete);
-    switchPage(['Connect Exchange', 'Add API Credentials', 'Test Connection', 'Sync Balances'].includes(firstIncomplete?.label) ? 'exchange' : 'campaigns');
+    switchPage('launch-mm');
     renderOnboardingWizard();
   });
   $('onboarding-later').addEventListener('click', () => {
