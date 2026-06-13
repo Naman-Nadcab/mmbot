@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -143,6 +144,9 @@ class MarketMakerRuntime:
             "volume_progress": self.latest_volume_progress,
             "known_tickers": len(self.latest_ticker),
             "known_orderbooks": len(self.latest_orderbook),
+            "latest_ticker": self.latest_ticker,
+            "latest_orderbook": {key: asdict(value) for key, value in self.latest_orderbook.items()},
+            "latest_analytics": self.latest_analytics,
             "open_paper_orders": len(self.paper.open_orders),
             "order_lifecycle": self._order_lifecycle_metrics(),
             "paper_fills": len(self.paper.fills),

@@ -46,6 +46,8 @@ const state = {
   pagination: { orders: { page: 0, size: 50 }, trades: { page: 0, size: 50 } },
   data: { engines: {}, infrastructure: {}, exchanges: {}, exchangeIntegrations: [], exchangeBalances: {}, orders: [], trades: [], positions: [], inventory: null, pnl: null, riskEvents: [], auditLogs: [], volume: null, coinstore: {}, kill: null }
 };
+state.orderSort = { key: 'created_at', direction: 'desc' };
+state.lastConnectionTest = null;
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -263,6 +265,7 @@ async function refreshRest() {
   if (state.token) {
     await Promise.all([loadConfig(), refreshOperations(), refreshCoinstore()].map((p) => p.catch((error) => logEvent('refresh_error', { error: error.message }))));
   }
+  $('last-refresh-at').textContent = new Date().toLocaleTimeString();
   renderAll();
 }
 
@@ -535,6 +538,37 @@ function initEmergency() {
       setPending(`emergency:${form.dataset.endpoint}`, false, submit);
     }
   });
+  renderOperatorEmergencyActions(actions);
+}
+
+function renderOperatorEmergencyActions(actions) {
+  const target = $('operator-emergency-actions');
+  if (!target) return;
+  const labels = {
+    'disable-trading': 'Disable Trading',
+    'enable-trading': 'Enable Trading',
+    'cancel-all-orders': 'Cancel All Orders',
+    'close-positions': 'Close Positions',
+    shutdown: 'Kill Switch',
+    'runtime-restart': 'Resume Quoting',
+  };
+  target.innerHTML = actions.map(([id, _label, word]) => `<button type="button" class="${['disable-trading','cancel-all-orders','close-positions','shutdown'].includes(id) ? 'danger' : 'secondary'}" data-operator-emergency="${id}" data-word="${word}">${labels[id] || _label}</button>`).join('');
+  target.querySelectorAll('[data-operator-emergency]').forEach((button) => button.addEventListener('click', async () => {
+    const id = button.dataset.operatorEmergency;
+    const action = actions.find(([item]) => item === id);
+    if (!action) return;
+    const confirmation = prompt(`Type ${action[2]} to confirm ${action[1]}`);
+    if (!confirmation || !confirmation.toLowerCase().includes(action[2])) return;
+    try {
+      setPending(`operator-emergency:${id}`, true, button);
+      const result = await request(action[3], { method: 'POST', body: JSON.stringify({ confirmation, reason: `operator ${action[1].toLowerCase()}` }) });
+      logEvent('operator_emergency_action', { action: id, command_id: result.event?.command_id });
+      await refreshRuntimeEvents();
+      renderRuntimeAckState(result.event?.command_id);
+    } finally {
+      setPending(`operator-emergency:${id}`, false, button);
+    }
+  }));
 }
 
 async function sendStrategy(command) {
@@ -543,6 +577,7 @@ async function sendStrategy(command) {
 }
 
 function renderAll() {
+  renderGlobalStatus();
   renderPnl();
   renderInventory();
   renderOrders();
@@ -554,7 +589,38 @@ function renderAll() {
   renderExchanges();
   renderVolume();
   renderCoinstore();
+  renderMarketMakerStatus();
+  renderInventoryManagement();
   renderRuntimeAckState();
+}
+
+function renderGlobalStatus() {
+  const maker = state.data.engines?.['market-maker-engine'] || {};
+  const data = state.data.engines?.['market-data-engine'] || {};
+  const makerRuntime = maker.runtime || {};
+  const dataRuntime = data.runtime || {};
+  const coinstoreHealth = state.data.coinstore.health || {};
+  const coinstoreAccount = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore')?.accounts?.[0];
+  setStatusTile('status-market-data', 'status-market-data-sub', data.status || 'unknown', `msgs ${dataRuntime.websocket_messages_received || 0}`);
+  setStatusTile('status-market-maker', 'status-market-maker-sub', maker.status || 'unknown', `quotes ${counter('market_maker.quotes_generated')}`);
+  setStatusTile('status-coinstore-rest', 'status-coinstore-rest-sub', coinstoreAccount?.rest_status || coinstoreHealth.rest?.status || 'unknown', coinstoreAccount?.last_success_at || coinstoreHealth.rest?.error || 'No test');
+  setStatusTile('status-coinstore-public-ws', 'status-coinstore-public-ws-sub', coinstoreHealth.websocket?.status || dataRuntime.websocket_state || 'unknown', `known ${Object.keys(state.data.exchanges || {}).length}`);
+  setStatusTile('status-coinstore-private-ws', 'status-coinstore-private-ws-sub', coinstoreAccount?.private_ws_status || 'unknown', coinstoreAccount?.last_tested_at || 'No test');
+  setStatusTile('status-trading-mode', 'status-trading-mode-sub', makerRuntime.mode || 'unknown', makerRuntime.trading_enabled === false ? 'disabled' : 'enabled');
+  setStatusTile('status-risk-engine', 'status-risk-engine-sub', (state.data.riskEvents || []).some((item) => item.severity === 'critical') ? 'failed' : 'healthy', `${(state.data.riskEvents || []).length} events`);
+  setStatusTile('status-kill-switch', 'status-kill-switch-sub', state.data.kill?.active ? 'failed' : 'healthy', state.data.kill?.reason || 'inactive');
+}
+
+function setStatusTile(id, subId, status, subtitle) {
+  const el = $(id);
+  const sub = $(subId);
+  if (!el) return;
+  const parent = el.closest('.status-tile');
+  const normalized = String(status || 'unknown').toLowerCase();
+  const label = normalized.includes('healthy') || normalized.includes('connected') || normalized.includes('ok') || normalized.includes('paper') || normalized.includes('live') || normalized.includes('canary') ? 'Connected' : normalized.includes('warn') || normalized.includes('partial') || normalized.includes('degraded') ? 'Warning' : normalized.includes('fail') || normalized.includes('error') || normalized.includes('unhealthy') || normalized.includes('active') ? 'Failed' : title(normalized || 'unknown');
+  parent.className = `status-tile ${label === 'Connected' ? 'ok' : label === 'Warning' ? 'warn' : label === 'Failed' ? 'bad' : ''}`;
+  el.textContent = label;
+  if (sub) sub.textContent = subtitle || '';
 }
 
 function renderPnl() {
@@ -581,9 +647,12 @@ function renderOrders() {
   $('stale-orders-count').textContent = String(lifecycle.stale_orders_count ?? 0);
   $('cancelled-orders-count').textContent = String(lifecycle.cancelled_orders_count ?? 0);
   $('reconciliation-actions-count').textContent = String(lifecycle.reconciliation_actions ?? 0);
-  const items = pageSlice(state.data.orders, state.pagination.orders);
-  $('orders-body').innerHTML = rows(items, 6, (o) => `<tr><td>${esc(o.client_order_id || o.id)}</td><td>${esc(o.symbol)}</td><td>${esc(o.side)}</td><td>${esc(o.status)}</td><td>${num(o.price)}</td><td>${num(o.quantity)}</td></tr>`);
-  $('orders-page').textContent = `${state.pagination.orders.page + 1}/${pageCount(state.data.orders, state.pagination.orders)}`;
+  const query = String($('orders-search')?.value || '').toLowerCase();
+  const filtered = (state.data.orders || []).filter((o) => !query || JSON.stringify(o).toLowerCase().includes(query));
+  filtered.sort((a, b) => compareValues(a[state.orderSort.key], b[state.orderSort.key], state.orderSort.direction));
+  const items = pageSlice(filtered, state.pagination.orders);
+  $('orders-body').innerHTML = rows(items, 8, (o) => `<tr><td>${esc(o.exchange_order_id || o.client_order_id || o.id)}</td><td>${esc(exchangeFromOrder(o))}</td><td>${esc(o.side)}</td><td>${num(o.price)}</td><td>${num(o.quantity)}</td><td><span class="order-status ${esc(o.status)}">${esc(o.status)}</span></td><td>${orderAge(o.created_at)}</td><td>${esc(o.created_at || '')}</td></tr>`);
+  $('orders-page').textContent = `${state.pagination.orders.page + 1}/${pageCount(filtered, state.pagination.orders)}`;
 }
 
 function renderTrades() {
@@ -617,6 +686,56 @@ function renderEngines() {
   const maker = state.data.engines['market-maker-engine'];
   const runtime = maker?.runtime || {};
   setPill('mode-pill', `${runtime.mode || 'mode unknown'} ${runtime.trading_enabled === false ? 'disabled' : 'enabled'}`, runtime.trading_enabled === false ? 'bad' : 'ok');
+}
+
+function renderMarketMakerStatus() {
+  const maker = state.data.engines?.['market-maker-engine'] || {};
+  const runtime = maker.runtime || {};
+  const lifecycle = runtime.order_lifecycle || {};
+  const config = runtime.runtime_config || {};
+  $('mm-status-mode').textContent = runtime.mode || 'unknown';
+  $('mm-status-panel').innerHTML = [
+    stackItem('Strategy Active', runtime.trading_enabled === false ? 'No' : 'Yes'),
+    stackItem('Quoting Enabled', runtime.quoting_enabled === false ? 'No' : 'Yes'),
+    stackItem('Trading Enabled', runtime.trading_enabled === false ? 'No' : 'Yes'),
+    stackItem('Current Spread', `${num(currentSpreadBps())} bps`),
+    stackItem('Current Mid Price', num(currentMidPrice())),
+    stackItem('Buy Orders', lifecycle.active_buy_orders ?? 0),
+    stackItem('Sell Orders', lifecycle.active_sell_orders ?? 0),
+    stackItem('Total Open Orders', lifecycle.open_orders_count ?? state.data.orders.length ?? 0),
+    stackItem('Last Quote Refresh', `${counter('market_maker.quote_refreshes')} refreshes`),
+    stackItem('Last Reconciliation', `${counter('reconciliation.runs')} runs`),
+    stackItem('Runtime Mode', runtime.mode || 'unknown')
+  ].join('');
+}
+
+function renderInventoryManagement() {
+  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  const usdt = balances.find((item) => item.asset === 'USDT') || {};
+  const base = balances.find((item) => item.asset && item.asset !== 'USDT') || {};
+  const inv = state.data.inventory || {};
+  const maker = state.data.engines?.['market-maker-engine']?.runtime || {};
+  const target = maker.runtime_config?.inventory?.target_base_ratio ?? 0;
+  const current = state.data.exchangeBalances?.coinstore?.inventory_ratio ?? 0;
+  const maxExposure = maker.runtime_config?.inventory?.max_asset_exposure ?? 0;
+  const exposure = inv.exposure_notional ?? inv.total_notional ?? 0;
+  const skew = (current - target) * 100;
+  const bias = skew > 1 ? 'Sell bias' : skew < -1 ? 'Buy bias' : 'Neutral';
+  $('inventory-bias-pill').textContent = bias;
+  $('inventory-panel-live').innerHTML = [
+    stackItem('USDT Balance', num(usdt.available_balance || 0)),
+    stackItem('Token Balance', `${base.asset || 'Base'} ${num(base.available_balance || 0)}`),
+    stackItem('Target Inventory Ratio', `${num(target * 100)}%`),
+    stackItem('Current Ratio', `${num(current * 100)}%`),
+    stackItem('Inventory Skew', `${num(skew)}%`),
+    stackItem('Inventory Bias', bias),
+    stackItem('Exposure', money(exposure)),
+    stackItem('Max Exposure', money(maxExposure))
+  ].join('');
+  const bar = $('inventory-ratio-bar');
+  if (bar) bar.style.width = `${Math.max(0, Math.min(100, current * 100))}%`;
+  $('portfolio-value').textContent = money(state.data.exchangeBalances?.coinstore?.portfolio_value || 0);
+  $('inventory-ratio-value').textContent = `${num(current * 100)}%`;
 }
 
 function orderLifecycle() {
@@ -720,6 +839,46 @@ function exchangeCard(name, integration) {
   </div>`;
 }
 
+function currentSpreadBps() {
+  const analytics = state.data.engines?.['market-maker-engine']?.runtime?.latest_analytics || {};
+  return Number(Object.values(analytics)[0]?.spread?.spread_bps || 0);
+}
+
+function currentMidPrice() {
+  const book = state.data.engines?.['market-maker-engine']?.runtime?.latest_orderbook || {};
+  const first = Object.values(book)[0];
+  if (!first?.bids?.length || !first?.asks?.length) return 0;
+  const bid = Math.max(...first.bids.map((item) => Number(item.price || 0)));
+  const ask = Math.min(...first.asks.map((item) => Number(item.price || 0)));
+  return (bid + ask) / 2;
+}
+
+function counter(name) {
+  return Number(state.data.engines?.['market-maker-engine']?.runtime?.metrics?.counters?.[name] || 0);
+}
+
+function exchangeFromOrder(order) {
+  const id = String(order.exchange_order_id || order.client_order_id || '');
+  if (id.includes('paper')) return 'paper';
+  if (id.includes('coinstore') || order.client_order_id?.includes('mm-')) return 'coinstore';
+  return order.exchange || 'unknown';
+}
+
+function orderAge(createdAt) {
+  const ts = Date.parse(createdAt || '');
+  if (!Number.isFinite(ts)) return '';
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
+}
+
+function compareValues(a, b, direction) {
+  const left = Number.isFinite(Number(a)) ? Number(a) : String(a || '');
+  const right = Number.isFinite(Number(b)) ? Number(b) : String(b || '');
+  if (left < right) return direction === 'asc' ? -1 : 1;
+  if (left > right) return direction === 'asc' ? 1 : -1;
+  return 0;
+}
+
 function accountItem(account) {
   const next = account.is_enabled ? 'disable' : 'enable';
   return `<div class="stack-item"><b>${esc(account.account_alias)} ${esc(account.environment)}</b><span class="pill ${account.is_enabled ? 'ok' : 'neutral'}">${account.is_enabled ? 'enabled' : 'disabled'} key=${account.has_api_key} secret=${account.has_api_secret}</span><button type="button" class="ghost" data-account-id="${esc(account.id)}" data-account-status="${next}">${title(next)}</button></div>`;
@@ -777,13 +936,19 @@ function init() {
   $('disconnect-ws').addEventListener('click', disconnectWebSocket);
   $('orders-prev').addEventListener('click', () => changePage('orders', -1));
   $('orders-next').addEventListener('click', () => changePage('orders', 1));
+  $('orders-search').addEventListener('input', () => { state.pagination.orders.page = 0; renderOrders(); });
+  document.querySelectorAll('[data-sort-orders]').forEach((header) => header.addEventListener('click', () => {
+    const key = header.dataset.sortOrders;
+    state.orderSort = { key, direction: state.orderSort.key === key && state.orderSort.direction === 'desc' ? 'asc' : 'desc' };
+    renderOrders();
+  }));
   $('trades-prev').addEventListener('click', () => changePage('trades', -1));
   $('trades-next').addEventListener('click', () => changePage('trades', 1));
   $('clear-log').addEventListener('click', () => { state.lastEvents = []; $('event-log').textContent = ''; });
   renderAll();
   refreshRest();
   connectWebSocket();
-  setInterval(refreshRest, 10000);
+  setInterval(refreshRest, 5000);
   setInterval(() => { if (state.token) refreshCoinstore().then(renderCoinstore); }, 30000);
 }
 
