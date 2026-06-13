@@ -80,6 +80,15 @@ p { color: var(--muted); line-height: 1.55; }
 .timeline-item { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px; border: 1px solid var(--border); border-radius: 14px; background: #F9FAFB; }
 .timeline-icon { width: 34px; height: 34px; border-radius: 50%; background: var(--primary-soft); color: var(--primary); display: grid; place-items: center; font-weight: 900; }
 .timeline-item small { color: var(--muted); }
+.onboarding-wizard.hidden { display: none; }
+.onboarding-steps, .readiness-list, .recommendations-list { display: grid; gap: 10px; }
+.onboarding-step, .readiness-item, .recommendation-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: #F9FAFB; }
+.onboarding-step { grid-template-columns: 28px minmax(0, 1fr); align-items: start; }
+.onboarding-step i, .readiness-item i { width: 24px; height: 24px; border-radius: 50%; display: inline-grid; place-items: center; color: #fff; font-style: normal; font-size: 0.75rem; font-weight: 900; }
+.readiness-item { grid-template-columns: 28px minmax(0, 1fr); align-items: start; }
+.state-ok i { background: var(--success); }.state-warn i { background: var(--warning); }.state-bad i { background: var(--danger); }
+.recommendation-card p { margin: 0; }
+.recommendation-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .health-summary, .metric-stack { display: grid; gap: 10px; }
 .health-row, .stack-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 14px; background: #F9FAFB; }
 .stack-item span { text-align: right; color: var(--muted); font-size: 0.84rem; }
@@ -98,8 +107,16 @@ p { color: var(--muted); line-height: 1.55; }
 .exchange-card, .emergency-card { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 16px; background: #fff; }
 .exchange-card h3, .emergency-card h3 { margin: 0; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .campaign-wizard { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.template-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); gap: 14px; }
+.template-card { display: grid; gap: 10px; text-align: left; color: var(--text); background: #fff; border: 1px solid var(--border); box-shadow: var(--shadow-soft); }
+.template-card.active { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
+.template-card[disabled] { opacity: 0.52; cursor: not-allowed; transform: none; }
+.template-card strong { font-size: 1rem; }
+.template-card small, .readiness-item small, .onboarding-step small, .recommendation-card small { color: var(--muted); line-height: 1.45; }
 .campaign-section > span, .start-card > span { color: var(--primary); font-size: 0.75rem; font-weight: 850; text-transform: uppercase; letter-spacing: 0.08em; }
 .campaign-section, .start-card { display: grid; gap: 10px; align-content: start; }
+.readiness-score { display: flex; align-items: baseline; gap: 10px; }
+.readiness-score strong { font-size: 2.25rem; letter-spacing: -0.05em; }
 .choice-grid button.active, .monitor-tabs button.active { color: #fff; background: var(--primary); border-color: var(--primary); }
 .slider-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.8rem; }
 .primary-large { width: 100%; padding: 15px 18px; font-size: 1rem; }

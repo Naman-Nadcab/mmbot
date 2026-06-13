@@ -51,13 +51,23 @@
         </section>
 
         <section id="page-dashboard" class="page active">
+          <section id="onboarding-wizard" class="card onboarding-wizard">
+            <div class="section-heading">
+              <div><span class="eyebrow">First-Time Setup</span><h2>Launch market making in minutes</h2></div>
+              <span id="onboarding-score" class="status-chip neutral">0%</span>
+            </div>
+            <div class="progress-bar"><span id="onboarding-progress-bar"></span></div>
+            <div id="onboarding-steps" class="onboarding-steps"></div>
+            <div class="button-row"><button id="onboarding-resume" type="button">Resume Setup</button><button id="onboarding-later" type="button" class="ghost">Resume Later</button></div>
+          </section>
+
           <section class="kpi-strip executive-kpis" aria-label="Executive KPIs">
             <article class="kpi-card"><span>Portfolio Value</span><strong id="portfolio-value">$0.00</strong><small>Synced balances</small></article>
             <article class="kpi-card"><span>Today's Volume</span><strong id="daily-volume">$0.00</strong><small id="daily-volume-subtitle">target progress</small></article>
-            <article class="kpi-card"><span>Today's Orders</span><strong id="open-orders-count">0</strong><small>Open and recent orders</small></article>
             <article class="kpi-card"><span>Today's Fills</span><strong id="todays-fills-value">0</strong><small>Filled trades</small></article>
-            <article class="kpi-card"><span>Market Making Score</span><strong id="mm-score-value">0</strong><small id="mm-score-label">Waiting for data</small></article>
+            <article class="kpi-card"><span>Active Campaigns</span><strong id="active-campaigns-value">0</strong><small id="active-campaigns-label">No campaign running</small></article>
             <article class="kpi-card"><span>Liquidity Score</span><strong id="liquidity-score-value">0</strong><small id="liquidity-score-label">Waiting for data</small></article>
+            <article class="kpi-card"><span>Market Making Health</span><strong id="mm-health-value">Stopped</strong><small id="mm-score-label">Waiting for data</small></article>
           </section>
 
           <section class="campaign-status-card card">
@@ -75,6 +85,8 @@
               <button type="button" class="secondary" data-mm-command="resume">Resume</button>
               <button type="button" class="danger" data-mm-command="stop">Stop</button>
               <button id="campaign-edit" type="button" class="ghost">Edit</button>
+              <button id="campaign-analytics" type="button" class="ghost">Analytics</button>
+              <button id="campaign-sync" type="button" class="secondary">Sync</button>
             </div>
           </section>
 
@@ -91,6 +103,10 @@
                 <div class="health-row"><span>Market Data</span><strong id="health-market-data">Checking</strong><i id="health-market-data-dot" class="dot neutral"></i></div>
                 <div class="health-row"><span>Market Maker</span><strong id="health-market-maker">Checking</strong><i id="health-market-maker-dot" class="dot neutral"></i></div>
               </div>
+            </article>
+            <article class="card recommendations-card">
+              <div class="section-heading"><div><span class="eyebrow">Smart Recommendations</span><h2>Suggested next steps</h2></div></div>
+              <div id="recommendations-list" class="recommendations-list"></div>
             </article>
           </section>
         </section>
@@ -153,6 +169,10 @@
             <div><span class="eyebrow">Campaigns</span><h2>Create Market Making Campaign</h2><p>Create a client-friendly campaign. The automatic settings engine calculates spread, layers, quote size, inventory target, refresh rate, and risk limits.</p></div>
             <span id="mm-status-mode" class="status-chip neutral">mode</span>
           </section>
+          <section class="card template-selector">
+            <div class="section-heading"><div><span class="eyebrow">Select Market Making Goal</span><h2>Choose a campaign template</h2></div></div>
+            <div id="template-cards" class="template-grid"></div>
+          </section>
           <section class="campaign-wizard">
             <article class="card campaign-section"><span>Step 1</span><h3>Campaign Name</h3><input id="campaign-name" value="TEX Market Making" autocomplete="off" /></article>
             <article class="card campaign-section"><span>Step 2</span><h3>Trading Pair</h3><select id="mm-pair-select"><option value="BTC/USDT">BTC/USDT</option><option value="ETH/USDT">ETH/USDT</option><option value="TEX/USDT">TEX/USDT</option></select></article>
@@ -161,7 +181,8 @@
             <article class="card campaign-section"><span>Step 5</span><h3>Target Daily Volume</h3><div class="choice-grid" data-choice-group="volume"><button type="button" data-daily-volume="10000">10,000 USDT</button><button type="button" data-daily-volume="50000" class="secondary">50,000 USDT</button><button type="button" data-daily-volume="100000" class="secondary">100,000 USDT</button></div><input id="target-daily-volume" type="number" min="0" step="1000" value="10000" /></article>
             <article class="card campaign-section review-card"><span>Step 6</span><h3>Review</h3><div id="mm-review" class="metric-stack"></div></article>
             <article class="card campaign-section automatic-settings"><span>Automatic Settings Engine</span><h3>Recommended Settings</h3><div id="automatic-settings-summary" class="metric-stack"></div><details><summary>Advanced Settings</summary><div id="campaign-advanced-settings" class="metric-stack"></div></details></article>
-            <article class="card start-card"><span>Step 7</span><h3>Start Market Making</h3><p>Start the runtime after reviewing your campaign.</p><button id="mm-start-large" type="button" class="primary-large">Start Market Making</button><div class="button-row"><button type="button" class="secondary" data-mm-command="pause">Pause</button><button type="button" class="secondary" data-mm-command="resume">Resume</button><button type="button" class="danger" data-mm-command="stop">Stop</button></div></article>
+            <article class="card readiness-card"><span>Launch Readiness</span><h3 id="readiness-title">Readiness Score</h3><div class="readiness-score"><strong id="readiness-score">0%</strong><span id="readiness-label">Needs Attention</span></div><div id="readiness-checklist" class="readiness-list"></div></article>
+            <article class="card start-card"><span>Step 7</span><h3>Start Market Making</h3><p id="start-readiness-message">Start is available when critical checks pass.</p><button id="mm-start-large" type="button" class="primary-large">Start Market Making</button><div class="button-row"><button type="button" class="secondary" data-mm-command="pause">Pause</button><button type="button" class="secondary" data-mm-command="resume">Resume</button><button type="button" class="danger" data-mm-command="stop">Stop</button></div></article>
           </section>
           <article class="card"><div class="section-heading"><div><span class="eyebrow">Runtime Status</span><h2>Market Maker</h2></div></div><div id="mm-status-panel" class="metric-stack"></div></article>
         </section>

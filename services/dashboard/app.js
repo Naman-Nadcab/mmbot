@@ -23,6 +23,68 @@ const configDomains = {
 };
 
 const supportedExchanges = ['coinstore', 'mexc', 'gate', 'bitmart', 'kucoin', 'binance'];
+const campaignTemplates = {
+  liquidity_builder: {
+    label: 'Liquidity Builder',
+    tone: 'green',
+    purpose: 'Create tight books and healthy liquidity.',
+    recommended: 'New tokens and long-term projects',
+    riskLevel: 'low',
+    spreadBps: 18,
+    layers: 5,
+    inventoryTarget: 0.55,
+    refreshRateSeconds: 6,
+    volumeMultiplier: 0.8
+  },
+  balanced: {
+    label: 'Balanced Market Making',
+    tone: 'yellow',
+    purpose: 'Normal day-to-day market making.',
+    recommended: 'Most projects',
+    riskLevel: 'medium',
+    spreadBps: 24,
+    layers: 4,
+    inventoryTarget: 0.55,
+    refreshRateSeconds: 5,
+    volumeMultiplier: 1
+  },
+  volume_booster: {
+    label: 'Volume Booster',
+    tone: 'red',
+    purpose: 'Increase market activity.',
+    recommended: 'Growing markets',
+    riskLevel: 'high',
+    spreadBps: 12,
+    layers: 6,
+    inventoryTarget: 0.6,
+    refreshRateSeconds: 3,
+    volumeMultiplier: 1.4
+  },
+  token_launch: {
+    label: 'Token Launch Mode',
+    tone: 'blue',
+    purpose: 'Support newly listed tokens.',
+    recommended: 'Launch campaigns',
+    riskLevel: 'medium',
+    spreadBps: 16,
+    layers: 7,
+    inventoryTarget: 0.5,
+    refreshRateSeconds: 4,
+    volumeMultiplier: 1.2
+  },
+  custom: {
+    label: 'Custom',
+    tone: 'gray',
+    purpose: 'Manual template for advanced users.',
+    recommended: 'Expert mode only',
+    riskLevel: 'medium',
+    spreadBps: 22,
+    layers: 4,
+    inventoryTarget: 0.55,
+    refreshRateSeconds: 5,
+    volumeMultiplier: 1
+  }
+};
 
 const state = {
   apiBase: normalizeApiBase(localStorage.getItem('ops.apiBase') || '/api'),
@@ -44,7 +106,16 @@ state.orderSort = { key: 'created_at', direction: 'desc' };
 state.lastConnectionTest = null;
 state.monitorTab = 'open-orders';
 state.expertMode = localStorage.getItem('ops.expertMode') === 'true';
-state.mmCampaign = { name: localStorage.getItem('ops.campaignName') || 'TEX Market Making', pair: 'BTC/USDT', budget: 1000, riskLevel: 'medium', targetDailyVolume: 10000 };
+state.dismissedRecommendations = new Set(JSON.parse(localStorage.getItem('ops.dismissedRecommendations') || '[]'));
+state.onboardingResumeLater = localStorage.getItem('ops.onboardingResumeLater') === 'true';
+state.mmCampaign = {
+  name: localStorage.getItem('ops.campaignName') || '',
+  pair: localStorage.getItem('ops.campaignPair') || 'BTC/USDT',
+  budget: Number(localStorage.getItem('ops.campaignBudget') || 1000),
+  riskLevel: localStorage.getItem('ops.campaignRisk') || 'medium',
+  targetDailyVolume: Number(localStorage.getItem('ops.campaignVolume') || 10000),
+  template: localStorage.getItem('ops.campaignTemplate') || ''
+};
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -319,6 +390,20 @@ function setExpertMode(enabled) {
   document.body.classList.toggle('expert-mode', state.expertMode);
   const toggle = $('expert-mode-toggle');
   if (toggle) toggle.checked = state.expertMode;
+  renderTemplates();
+}
+
+function persistCampaign() {
+  localStorage.setItem('ops.campaignName', state.mmCampaign.name || '');
+  localStorage.setItem('ops.campaignPair', state.mmCampaign.pair || '');
+  localStorage.setItem('ops.campaignBudget', String(state.mmCampaign.budget || 0));
+  localStorage.setItem('ops.campaignRisk', state.mmCampaign.riskLevel || '');
+  localStorage.setItem('ops.campaignVolume', String(state.mmCampaign.targetDailyVolume || 0));
+  localStorage.setItem('ops.campaignTemplate', state.mmCampaign.template || '');
+}
+
+function campaignExists() {
+  return Boolean(state.mmCampaign.name && state.mmCampaign.template && state.mmCampaign.budget > 0);
 }
 
 function connectWebSocket() {
@@ -598,6 +683,17 @@ function renderOperatorEmergencyActions(actions) {
 }
 
 async function sendStrategy(command) {
+  if (command === 'start') {
+    const readiness = readinessState();
+    const criticalFailures = readiness.items.filter((item) => item.critical && item.state === 'bad');
+    if (criticalFailures.length) {
+      const message = `Campaign cannot start: ${criticalFailures.map((item) => item.label).join(', ')}`;
+      logEvent('campaign_start_blocked', { reason: message });
+      renderReadiness();
+      throw new Error(message);
+    }
+    localStorage.setItem('ops.campaignCreated', 'true');
+  }
   const result = await request('/admin/strategy/command', { method: 'POST', body: JSON.stringify({ command, confirmation: command, reason: `operator ${command}` }) });
   logEvent('strategy_command', result.state);
   await refreshRuntimeEvents();
@@ -623,9 +719,13 @@ function renderAll() {
   renderLiveMarketData();
   renderMarketMakerStatus();
   renderInventoryManagement();
+  renderOnboardingWizard();
+  renderTemplates();
   renderDashboardSummary();
   renderActivityTimeline();
   renderMarketMakingCampaign();
+  renderReadiness();
+  renderRecommendations();
   renderMonitoringSummary();
   renderRiskInventoryUx();
   renderRuntimeAckState();
@@ -648,6 +748,74 @@ function renderQuickStartWizard() {
   const target = $('wizard-steps');
   if (!target) return;
   target.innerHTML = steps.map(([number, label, complete, subtitle]) => `<article class="wizard-step ${complete ? 'ok' : 'warn'}"><span>Step ${number}</span><strong>${esc(label)}</strong><small>${esc(subtitle)}</small><span class="pill ${complete ? 'ok' : 'warn'}">${complete ? 'Complete' : 'Action Required'}</span></article>`).join('');
+}
+
+function renderOnboardingWizard() {
+  const wrapper = $('onboarding-wizard');
+  if (!wrapper) return;
+  const steps = onboardingSteps();
+  const completed = steps.filter((step) => step.complete).length;
+  const percent = Math.round((completed / steps.length) * 100);
+  const needsSetup = !steps.every((step) => step.complete);
+  wrapper.classList.toggle('hidden', !needsSetup || state.onboardingResumeLater);
+  setText('onboarding-score', `${percent}%`);
+  const score = $('onboarding-score');
+  if (score) score.className = `status-chip ${percent === 100 ? 'ok' : percent >= 60 ? 'warn' : 'bad'}`;
+  const bar = $('onboarding-progress-bar');
+  if (bar) bar.style.width = `${percent}%`;
+  const target = $('onboarding-steps');
+  if (target) {
+    target.innerHTML = steps.map((step, index) => `<div class="onboarding-step ${step.complete ? 'state-ok' : 'state-warn'}"><i>${step.complete ? 'OK' : index + 1}</i><div><strong>${esc(step.label)}</strong><small>${esc(step.detail)}</small></div></div>`).join('');
+  }
+}
+
+function onboardingSteps() {
+  const account = coinstoreAccount();
+  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  const readiness = readinessState();
+  return [
+    { label: 'Connect Exchange', complete: Boolean(account), detail: account ? 'Coinstore account exists' : 'Connect a Coinstore account' },
+    { label: 'Add API Credentials', complete: Boolean(account?.has_api_key && account?.has_api_secret), detail: account?.api_key_masked || 'Add API key and secret' },
+    { label: 'Test Connection', complete: isConnected(account?.connection_status || account?.rest_status), detail: account?.last_success_at || account?.last_error_message || 'Run connection test' },
+    { label: 'Sync Balances', complete: balances.length > 0, detail: balances.length ? `${balances.length} assets synced` : 'Sync balances from Coinstore' },
+    { label: 'Create Campaign', complete: campaignExists(), detail: campaignExists() ? state.mmCampaign.name : 'Select a template and campaign details' },
+    { label: 'Review', complete: readiness.score >= 75, detail: `${readiness.score}% readiness score` },
+    { label: 'Start Market Making', complete: state.data.engines?.['market-maker-engine']?.runtime?.trading_enabled !== false && Boolean(state.data.engines?.['market-maker-engine']), detail: state.data.engines?.['market-maker-engine'] ? 'Runtime available' : 'Start after readiness checks pass' }
+  ];
+}
+
+function renderTemplates() {
+  const target = $('template-cards');
+  if (!target) return;
+  target.innerHTML = Object.entries(campaignTemplates).map(([key, template]) => {
+    const isCustom = key === 'custom';
+    const disabled = isCustom && !state.expertMode;
+    return `<button type="button" class="template-card ${state.mmCampaign.template === key ? 'active' : ''}" data-template="${esc(key)}" ${disabled ? 'disabled' : ''}>
+      <span class="status-chip ${template.tone === 'green' ? 'ok' : template.tone === 'yellow' ? 'warn' : template.tone === 'red' ? 'bad' : 'neutral'}">${esc(isCustom ? 'Expert' : 'Template')}</span>
+      <strong>${esc(template.label)}</strong>
+      <small><b>Purpose:</b> ${esc(template.purpose)}</small>
+      <small><b>Recommended for:</b> ${esc(template.recommended)}</small>
+      <small>Automatically configures spread, layers, inventory target, risk profile and refresh intervals.</small>
+    </button>`;
+  }).join('');
+}
+
+function applyTemplate(key) {
+  const template = campaignTemplates[key];
+  if (!template || (key === 'custom' && !state.expertMode)) return;
+  state.mmCampaign.template = key;
+  state.mmCampaign.riskLevel = template.riskLevel;
+  if (!state.mmCampaign.name) state.mmCampaign.name = `${template.label} Campaign`;
+  state.mmCampaign.targetDailyVolume = Math.max(10000, Math.round(Number(state.mmCampaign.budget || 1000) * 10 * template.volumeMultiplier));
+  persistCampaign();
+  const name = $('campaign-name');
+  const volume = $('target-daily-volume');
+  if (name) name.value = state.mmCampaign.name;
+  if (volume) volume.value = String(state.mmCampaign.targetDailyVolume);
+  document.querySelectorAll('[data-risk-level]').forEach((button) => button.classList.toggle('active', button.dataset.riskLevel === state.mmCampaign.riskLevel));
+  renderTemplates();
+  renderMarketMakingCampaign();
+  renderReadiness();
 }
 
 function renderPremiumKpis() {
@@ -742,6 +910,10 @@ function renderDashboardSummary() {
   setText('mm-score-label', mmScore >= 75 ? 'Healthy' : mmScore >= 45 ? 'Needs attention' : 'Not running');
   setText('liquidity-score-value', String(liquidityScore));
   setText('liquidity-score-label', liquidityScore >= 75 ? 'Strong' : liquidityScore >= 45 ? 'Moderate' : 'Thin');
+  const running = makerRuntime.trading_enabled !== false && Boolean(state.data.engines?.['market-maker-engine']);
+  setText('active-campaigns-value', running ? '1' : '0');
+  setText('active-campaigns-label', running ? state.mmCampaign.name || 'Campaign running' : 'No campaign running');
+  setText('mm-health-value', mmScore >= 75 ? 'Healthy' : mmScore >= 45 ? 'Warning' : 'Stopped');
 }
 
 function renderActivityTimeline() {
@@ -801,6 +973,27 @@ function renderMarketMakingCampaign() {
   }
   const pair = $('mm-pair-select');
   if (pair && pair.value !== state.mmCampaign.pair) pair.value = state.mmCampaign.pair;
+  const name = $('campaign-name');
+  const budget = $('mm-budget');
+  const volume = $('target-daily-volume');
+  if (name && name.value !== state.mmCampaign.name) name.value = state.mmCampaign.name;
+  if (budget && Number(budget.value) !== Number(state.mmCampaign.budget)) budget.value = String(state.mmCampaign.budget);
+  if (volume && Number(volume.value) !== Number(state.mmCampaign.targetDailyVolume)) volume.value = String(state.mmCampaign.targetDailyVolume);
+  document.querySelectorAll('[data-budget]').forEach((button) => {
+    const active = Number(button.dataset.budget) === Number(state.mmCampaign.budget);
+    button.classList.toggle('active', active);
+    button.classList.toggle('secondary', !active);
+  });
+  document.querySelectorAll('[data-risk-level]').forEach((button) => {
+    const active = button.dataset.riskLevel === state.mmCampaign.riskLevel;
+    button.classList.toggle('active', active);
+    button.classList.toggle('secondary', !active);
+  });
+  document.querySelectorAll('[data-daily-volume]').forEach((button) => {
+    const active = Number(button.dataset.dailyVolume) === Number(state.mmCampaign.targetDailyVolume);
+    button.classList.toggle('active', active);
+    button.classList.toggle('secondary', !active);
+  });
   setText('campaign-status-name', state.mmCampaign.name || 'Market Making Campaign');
   setText('campaign-status-exchange', 'Coinstore');
   setText('campaign-status-pair', state.mmCampaign.pair);
@@ -820,16 +1013,111 @@ function renderMarketMakingCampaign() {
 function automaticCampaignSettings() {
   const budget = Number(state.mmCampaign.budget || 0);
   const volume = Number(state.mmCampaign.targetDailyVolume || 0);
-  const risk = state.mmCampaign.riskLevel;
+  const template = campaignTemplates[state.mmCampaign.template] || {};
+  const risk = state.mmCampaign.riskLevel || template.riskLevel || 'medium';
   const riskMultiplier = risk === 'low' ? 0.6 : risk === 'high' ? 1.4 : 1.0;
   return {
-    spreadBps: risk === 'low' ? 35 : risk === 'high' ? 12 : 22,
-    layers: Math.max(1, Math.min(8, Math.round((budget / 2500) * riskMultiplier) || 1)),
+    spreadBps: template.spreadBps ?? (risk === 'low' ? 35 : risk === 'high' ? 12 : 22),
+    layers: template.layers ?? Math.max(1, Math.min(8, Math.round((budget / 2500) * riskMultiplier) || 1)),
     quoteSize: Math.max(10, Math.round((budget / 20) * riskMultiplier)),
-    inventoryTarget: risk === 'high' ? 0.6 : risk === 'low' ? 0.5 : 0.55,
-    refreshRateSeconds: risk === 'high' ? 3 : risk === 'low' ? 10 : 5,
+    inventoryTarget: template.inventoryTarget ?? (risk === 'high' ? 0.6 : risk === 'low' ? 0.5 : 0.55),
+    refreshRateSeconds: template.refreshRateSeconds ?? (risk === 'high' ? 3 : risk === 'low' ? 10 : 5),
     riskLimit: Math.max(budget, Math.round(volume * (risk === 'high' ? 0.2 : risk === 'low' ? 0.08 : 0.12)))
   };
+}
+
+function readinessState() {
+  const account = coinstoreAccount();
+  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  const dataRuntime = state.data.engines?.['market-data-engine']?.runtime || {};
+  const maker = state.data.engines?.['market-maker-engine'] || {};
+  const runtime = maker.runtime || {};
+  const hasPair = Boolean(state.mmCampaign.pair);
+  const marketKeys = Object.keys(dataRuntime.last_message_timestamp || runtime.latest_orderbook || {});
+  const pairHasData = marketKeys.some((key) => key.includes(state.mmCampaign.pair)) || Boolean(latestOrderbook());
+  const items = [
+    { label: 'Exchange Connected', detail: account ? account.account_alias : 'No exchange account connected', state: account ? 'ok' : 'bad', critical: true },
+    { label: 'API Valid', detail: account?.last_error_message || account?.last_success_at || 'Connection test required', state: isConnected(account?.connection_status || account?.rest_status) ? 'ok' : account ? 'warn' : 'bad', critical: true },
+    { label: 'Private WS Connected', detail: account?.private_ws_status || 'No private stream status', state: isConnected(account?.private_ws_status) || account?.private_ws_status === 'not_supported' ? 'ok' : account ? 'warn' : 'bad', critical: false },
+    { label: 'Balance Synced', detail: balances.length ? `${balances.length} assets synced` : 'No synced balances', state: balances.length ? 'ok' : 'bad', critical: true },
+    { label: 'Trading Pair Available', detail: state.mmCampaign.pair || 'Select a trading pair', state: hasPair ? 'ok' : 'bad', critical: true },
+    { label: 'Budget Assigned', detail: `${num(state.mmCampaign.budget)} USDT`, state: state.mmCampaign.budget > 0 ? 'ok' : 'bad', critical: true },
+    { label: 'Risk Configured', detail: title(state.mmCampaign.riskLevel || ''), state: state.mmCampaign.riskLevel ? 'ok' : 'bad', critical: true },
+    { label: 'Strategy Selected', detail: campaignTemplates[state.mmCampaign.template]?.label || 'Select a template', state: state.mmCampaign.template ? 'ok' : 'bad', critical: true },
+    { label: 'Market Data Available', detail: pairHasData ? 'Recent market data available' : 'Waiting for market data', state: pairHasData ? 'ok' : 'warn', critical: false },
+    { label: 'Market Maker Ready', detail: maker.status || 'Runtime not reporting yet', state: simpleStatus(maker.status).toLowerCase().includes('connected') || runtime.mode ? 'ok' : 'warn', critical: false }
+  ];
+  const score = Math.round(items.reduce((total, item) => total + (item.state === 'ok' ? 10 : item.state === 'warn' ? 5 : 0), 0));
+  const criticalFailures = items.filter((item) => item.critical && item.state === 'bad');
+  return { items, score, criticalFailures };
+}
+
+function renderReadiness() {
+  const readiness = readinessState();
+  setText('readiness-score', `${readiness.score}%`);
+  setText('readiness-label', readiness.score >= 95 ? 'Ready' : readiness.score >= 85 ? 'Minor Warnings' : 'Needs Attention');
+  const checklist = $('readiness-checklist');
+  if (checklist) {
+    checklist.innerHTML = readiness.items.map((item) => `<div class="readiness-item state-${item.state}"><i>${item.state === 'ok' ? 'OK' : item.state === 'warn' ? '!' : 'X'}</i><div><strong>${esc(item.label)}</strong><small>${esc(item.detail)}${item.critical ? ' - Required' : ''}</small></div></div>`).join('');
+  }
+  const start = $('mm-start-large');
+  if (start) start.disabled = readiness.criticalFailures.length > 0;
+  setText('start-readiness-message', readiness.criticalFailures.length ? `Resolve required checks: ${readiness.criticalFailures.map((item) => item.label).join(', ')}` : 'Ready to start campaign.');
+}
+
+function recommendations() {
+  const list = [];
+  const balances = state.data.exchangeBalances?.coinstore?.balances || [];
+  const current = Number(state.data.exchangeBalances?.coinstore?.inventory_ratio || 0);
+  const target = automaticCampaignSettings().inventoryTarget;
+  const deviation = current - target;
+  const spread = currentSpreadBps();
+  const volumeRatio = Number(state.data.volume?.daily?.progress_ratio);
+  const exposure = Number(state.data.inventory?.exposure_notional ?? state.data.inventory?.total_notional ?? 0);
+  const maxExposure = Number(state.data.engines?.['market-maker-engine']?.runtime?.runtime_config?.inventory?.max_asset_exposure || 0);
+  const usage = maxExposure ? exposure / maxExposure : 0;
+  const lifecycle = orderLifecycle();
+  if (!balances.length) list.push({ id: 'sync-balances', title: 'Balance sync recommended', reason: 'No synced balances are available from Coinstore.', action: 'Sync balances', type: 'sync' });
+  if (Math.abs(deviation) > 0.08) list.push({ id: 'inventory-target', title: deviation < 0 ? 'Inventory below target' : 'Inventory above target', reason: `Current ratio is ${num(current * 100)}% vs target ${num(target * 100)}%.`, action: 'Review inventory', type: 'review-monitoring' });
+  if (state.mmCampaign.budget > 0 && usage > 0.8) list.push({ id: 'risk-utilization', title: 'Risk utilization approaching threshold', reason: `${num(usage * 100)}% of max exposure is currently used.`, action: 'Review risk', type: 'review-settings' });
+  if (spread > 35) list.push({ id: 'tighten-spread', title: 'Spread can be tightened', reason: `Current spread is ${num(spread)} bps.`, action: 'Review campaign', type: 'review-campaign' });
+  if (Number.isFinite(volumeRatio) && volumeRatio < 0.5) list.push({ id: 'volume-target', title: 'Volume target unlikely to be met', reason: `Daily progress is ${Math.round(volumeRatio * 100)}%.`, action: 'Review campaign', type: 'review-campaign' });
+  if (Number.isFinite(volumeRatio) && volumeRatio > 1) list.push({ id: 'above-target', title: 'Campaign performing above target', reason: `Daily volume is ${Math.round(volumeRatio * 100)}% of target.`, action: 'Review analytics', type: 'review-monitoring' });
+  if (spread <= 20 && Number(lifecycle.open_orders_count || 0) > 0) list.push({ id: 'depth-healthy', title: 'Market depth healthy', reason: 'Spread and active orders indicate healthy liquidity.', action: 'Review analytics', type: 'review-monitoring' });
+  return list.filter((item) => !state.dismissedRecommendations.has(item.id));
+}
+
+function renderRecommendations() {
+  const target = $('recommendations-list');
+  if (!target) return;
+  const items = recommendations();
+  target.innerHTML = items.length ? items.map((item) => `<article class="recommendation-card" data-recommendation="${esc(item.id)}"><strong>${esc(item.title)}</strong><p>${esc(item.reason)}</p><small>Suggested action: ${esc(item.action)}</small><div class="recommendation-actions"><button type="button" data-recommendation-action="apply">Apply Recommendation</button><button type="button" class="secondary" data-recommendation-action="review">Review</button><button type="button" class="ghost" data-recommendation-action="dismiss">Dismiss</button></div></article>`).join('') : '<div class="empty">No live recommendations at this time</div>';
+}
+
+function handleRecommendation(id, action) {
+  const item = recommendations().find((recommendation) => recommendation.id === id);
+  if (!item) return;
+  if (action === 'dismiss') {
+    state.dismissedRecommendations.add(id);
+    localStorage.setItem('ops.dismissedRecommendations', JSON.stringify([...state.dismissedRecommendations]));
+    renderRecommendations();
+    return;
+  }
+  if (item.type === 'sync') {
+    $('coinstore-sync').click();
+  } else if (item.type === 'review-settings') {
+    switchPage('settings');
+    setExpertMode(true);
+  } else if (item.type === 'review-campaign') {
+    switchPage('campaigns');
+  } else {
+    switchPage('monitoring');
+  }
+  if (action === 'apply' && id === 'volume-target') {
+    state.mmCampaign.targetDailyVolume = Math.max(10000, Math.round(Number(state.mmCampaign.targetDailyVolume || 0) * 0.85));
+    persistCampaign();
+    renderMarketMakingCampaign();
+  }
 }
 
 function renderMonitoringSummary() {
@@ -1257,6 +1545,10 @@ function isConnected(status) {
   return value.includes('connected') || value.includes('healthy') || value === 'ok';
 }
 
+function coinstoreAccount() {
+  return (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore')?.accounts?.[0] || null;
+}
+
 function setChoiceActive(selector, activeButton) {
   document.querySelectorAll(selector).forEach((button) => {
     button.classList.toggle('active', button === activeButton);
@@ -1331,6 +1623,31 @@ function init() {
     }
   }));
   $('campaign-edit').addEventListener('click', () => switchPage('campaigns'));
+  $('campaign-analytics').addEventListener('click', () => switchPage('monitoring'));
+  $('campaign-sync').addEventListener('click', () => $('coinstore-sync').click());
+  $('onboarding-resume').addEventListener('click', () => {
+    state.onboardingResumeLater = false;
+    localStorage.setItem('ops.onboardingResumeLater', 'false');
+    const firstIncomplete = onboardingSteps().find((step) => !step.complete);
+    switchPage(['Connect Exchange', 'Add API Credentials', 'Test Connection', 'Sync Balances'].includes(firstIncomplete?.label) ? 'exchange' : 'campaigns');
+    renderOnboardingWizard();
+  });
+  $('onboarding-later').addEventListener('click', () => {
+    state.onboardingResumeLater = true;
+    localStorage.setItem('ops.onboardingResumeLater', 'true');
+    renderOnboardingWizard();
+  });
+  $('template-cards').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-template]');
+    if (!button || button.disabled) return;
+    applyTemplate(button.dataset.template);
+  });
+  $('recommendations-list').addEventListener('click', (event) => {
+    const action = event.target.closest('[data-recommendation-action]');
+    const card = event.target.closest('[data-recommendation]');
+    if (!action || !card) return;
+    handleRecommendation(card.dataset.recommendation, action.dataset.recommendationAction);
+  });
   $('mm-start-large').addEventListener('click', async (event) => {
     try {
       setPending('mm:start-large', true, event.target);
@@ -1341,25 +1658,30 @@ function init() {
       setPending('mm:start-large', false, event.target);
     }
   });
-  $('campaign-name').addEventListener('input', (event) => { state.mmCampaign.name = event.target.value; localStorage.setItem('ops.campaignName', state.mmCampaign.name); renderMarketMakingCampaign(); });
-  $('mm-pair-select').addEventListener('change', (event) => { state.mmCampaign.pair = event.target.value; renderMarketMakingCampaign(); });
-  $('mm-budget').addEventListener('input', (event) => { state.mmCampaign.budget = Number(event.target.value || 0); renderMarketMakingCampaign(); });
+  $('campaign-name').addEventListener('input', (event) => { state.mmCampaign.name = event.target.value; persistCampaign(); renderMarketMakingCampaign(); renderReadiness(); });
+  $('mm-pair-select').addEventListener('change', (event) => { state.mmCampaign.pair = event.target.value; persistCampaign(); renderMarketMakingCampaign(); renderReadiness(); });
+  $('mm-budget').addEventListener('input', (event) => { state.mmCampaign.budget = Number(event.target.value || 0); persistCampaign(); renderMarketMakingCampaign(); renderReadiness(); });
   document.querySelectorAll('[data-budget]').forEach((button) => button.addEventListener('click', () => {
     state.mmCampaign.budget = Number(button.dataset.budget || 0);
     $('mm-budget').value = String(state.mmCampaign.budget);
     setChoiceActive('[data-budget]', button);
+    persistCampaign();
     renderMarketMakingCampaign();
+    renderReadiness();
   }));
   document.querySelectorAll('[data-risk-level]').forEach((button) => button.addEventListener('click', () => {
     state.mmCampaign.riskLevel = button.dataset.riskLevel;
     setChoiceActive('[data-risk-level]', button);
+    persistCampaign();
     renderMarketMakingCampaign();
+    renderReadiness();
   }));
-  $('target-daily-volume').addEventListener('input', (event) => { state.mmCampaign.targetDailyVolume = Number(event.target.value || 0); renderMarketMakingCampaign(); });
+  $('target-daily-volume').addEventListener('input', (event) => { state.mmCampaign.targetDailyVolume = Number(event.target.value || 0); persistCampaign(); renderMarketMakingCampaign(); });
   document.querySelectorAll('[data-daily-volume]').forEach((button) => button.addEventListener('click', () => {
     state.mmCampaign.targetDailyVolume = Number(button.dataset.dailyVolume || 0);
     $('target-daily-volume').value = String(state.mmCampaign.targetDailyVolume);
     setChoiceActive('[data-daily-volume]', button);
+    persistCampaign();
     renderMarketMakingCampaign();
   }));
   $('expert-mode-toggle').addEventListener('change', (event) => setExpertMode(event.target.checked));
