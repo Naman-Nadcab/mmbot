@@ -60,3 +60,24 @@ class ExchangeAccountStatusRequest(BaseModel):
     is_enabled: bool
     confirmation: str = Field(min_length=3)
     reason: str = Field(min_length=3)
+
+
+class ExchangeConnectRequest(BaseModel):
+    exchange_name: Literal["coinstore", "mexc", "gate", "bitmart", "kucoin", "binance"]
+    account_alias: str = Field(default="primary", min_length=1)
+    environment: Literal["sandbox", "staging", "production"] = "production"
+    api_key: str = Field(min_length=1)
+    api_secret: str = Field(min_length=1)
+    passphrase: str | None = None
+    permissions: list[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class ExchangeTestRequest(BaseModel):
+    exchange_name: Literal["coinstore", "mexc", "gate", "bitmart", "kucoin", "binance"]
+    account_alias: str = Field(default="primary", min_length=1)
+    environment: Literal["sandbox", "staging", "production"] = "production"
+
+
+class ExchangeRemoveRequest(ExchangeTestRequest):
+    confirmation: str = Field(min_length=3)

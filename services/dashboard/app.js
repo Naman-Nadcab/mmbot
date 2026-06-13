@@ -28,6 +28,8 @@ const configDomains = {
   alert: [['enabled_channels', 'csv'], ['min_severity', 'text'], ['telegram_enabled', 'boolean']]
 };
 
+const supportedExchanges = ['coinstore', 'mexc', 'gate', 'bitmart', 'kucoin', 'binance'];
+
 const state = {
   apiBase: normalizeApiBase(localStorage.getItem('ops.apiBase') || '/api'),
   token: normalizeToken(localStorage.getItem('ops.token') || ''),
@@ -42,7 +44,7 @@ const state = {
   runtimeEvents: [],
   history: { pnl: [], inventory: [] },
   pagination: { orders: { page: 0, size: 50 }, trades: { page: 0, size: 50 } },
-  data: { engines: {}, infrastructure: {}, exchanges: {}, orders: [], trades: [], positions: [], inventory: null, pnl: null, riskEvents: [], auditLogs: [], volume: null, coinstore: {}, kill: null }
+  data: { engines: {}, infrastructure: {}, exchanges: {}, exchangeIntegrations: [], orders: [], trades: [], positions: [], inventory: null, pnl: null, riskEvents: [], auditLogs: [], volume: null, coinstore: {}, kill: null }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -350,6 +352,7 @@ function handleStreamMessage(raw) {
 }
 
 async function refreshCoinstore() {
+  try { state.data.exchangeIntegrations = (await request('/exchanges')).items || []; } catch (error) { logEvent('exchange_integrations_unavailable', { error: error.message }); }
   try { state.data.coinstore.accounts = (await request('/admin/coinstore/accounts')).items || []; } catch (error) { logEvent('coinstore_accounts_unavailable', { error: error.message }); }
   try { state.data.coinstore.health = await request('/admin/coinstore/health'); } catch (error) { state.data.coinstore.health = { rest: { status: 'unavailable', error: error.message } }; }
 }
@@ -361,21 +364,22 @@ function initCoinstore() {
     const submit = form.querySelector('button[type="submit"]');
     if (!validateRequired(form, ['account_alias', 'api_key', 'api_secret'])) return;
     const payload = {
+      exchange_name: form.exchange_name.value.trim().toLowerCase(),
       account_alias: form.account_alias.value.trim(),
       environment: form.environment.value,
       api_key: form.api_key.value,
       api_secret: form.api_secret.value,
       passphrase: form.passphrase.value || null,
       permissions: form.permissions.value.split(',').map((item) => item.trim()).filter(Boolean),
-      is_enabled: form.is_enabled.value === 'true'
+      enabled: form.is_enabled.value === 'true'
     };
     try {
       setPending('coinstore:save', true, submit);
-      const saved = await request('/admin/coinstore/accounts', { method: 'POST', body: JSON.stringify(payload) });
+      const saved = await request('/exchanges/connect', { method: 'POST', body: JSON.stringify(payload) });
       form.api_key.value = '';
       form.api_secret.value = '';
       form.passphrase.value = '';
-      logEvent('coinstore_account_saved', { id: saved.id, alias: saved.account_alias });
+      logEvent('exchange_account_saved', { id: saved.id, exchange: saved.exchange_name, alias: saved.account_alias });
       await refreshCoinstore();
       renderCoinstore();
     } catch (error) {
@@ -388,7 +392,7 @@ function initCoinstore() {
   $('coinstore-health').addEventListener('click', async (event) => {
     try {
       setPending('coinstore:health', true, event.target);
-      state.data.coinstore.health = await request('/admin/coinstore/health');
+      await refreshCoinstore();
       renderCoinstore();
     } finally {
       setPending('coinstore:health', false, event.target);
@@ -428,6 +432,49 @@ async function setCoinstoreAccountStatus(account, enabled, button) {
     renderCoinstore();
   } finally {
     setPending(`coinstore:status:${account.id}`, false, button);
+  }
+}
+
+function editExchangeAccount(account) {
+  const form = $('coinstore-form');
+  form.exchange_name.value = account.exchange_name;
+  form.account_alias.value = account.account_alias;
+  form.environment.value = account.environment;
+  form.permissions.value = (account.permissions || []).join(',');
+  form.is_enabled.value = String(Boolean(account.is_enabled));
+  form.api_key.value = '';
+  form.api_secret.value = '';
+  form.passphrase.value = '';
+  logEvent('exchange_account_edit_loaded', { exchange: account.exchange_name, account_alias: account.account_alias });
+}
+
+async function testExchangeAccount(account, button) {
+  try {
+    setPending(`exchange:test:${account.id}`, true, button);
+    const payload = { exchange_name: account.exchange_name, account_alias: account.account_alias, environment: account.environment };
+    const result = await request('/exchanges/test', { method: 'POST', body: JSON.stringify(payload) });
+    logEvent('exchange_connection_tested', { exchange: account.exchange_name, status: result.connection_status, rest: result.test_result?.rest_status, private_ws: result.test_result?.private_ws_status });
+    await refreshCoinstore();
+    renderCoinstore();
+  } finally {
+    setPending(`exchange:test:${account.id}`, false, button);
+  }
+}
+
+async function removeExchangeAccount(account, button) {
+  const confirmation = prompt(`Type remove to remove ${account.exchange_name} account ${account.account_alias}`);
+  if (!confirmation || !confirmation.toLowerCase().includes('remove')) {
+    logEvent('exchange_remove_rejected', { exchange: account.exchange_name, account_alias: account.account_alias });
+    return;
+  }
+  try {
+    setPending(`exchange:remove:${account.id}`, true, button);
+    await request('/exchanges/remove', { method: 'DELETE', body: JSON.stringify({ exchange_name: account.exchange_name, account_alias: account.account_alias, environment: account.environment, confirmation }) });
+    logEvent('exchange_account_removed', { exchange: account.exchange_name, account_alias: account.account_alias });
+    await refreshCoinstore();
+    renderCoinstore();
+  } finally {
+    setPending(`exchange:remove:${account.id}`, false, button);
   }
 }
 
@@ -591,7 +638,26 @@ function renderVolume() {
 
 function renderCoinstore() {
   const accounts = state.data.coinstore.accounts || [];
+  const integrations = state.data.exchangeIntegrations || [];
   const health = state.data.coinstore.health || {};
+  $('exchange-cards').innerHTML = supportedExchanges.map((name) => exchangeCard(name, integrations.find((item) => item.exchange_name === name))).join('');
+  $('exchange-cards').querySelectorAll('[data-exchange-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const exchange = button.dataset.exchange;
+      const action = button.dataset.exchangeAction;
+      const integration = integrations.find((item) => item.exchange_name === exchange);
+      const account = integration?.accounts?.[0];
+      if (action === 'connect') {
+        $('coinstore-form').exchange_name.value = exchange;
+        $('coinstore-form').account_alias.value = account?.account_alias || 'primary';
+        $('coinstore-form').environment.value = account?.environment || 'production';
+        $('coinstore-form').is_enabled.value = 'true';
+      } else if (account && action === 'edit') editExchangeAccount(account);
+      else if (account && action === 'test') testExchangeAccount(account, button);
+      else if (account && action === 'remove') removeExchangeAccount(account, button);
+      else if (action === 'refresh') refreshCoinstore().then(renderCoinstore);
+    });
+  });
   $('coinstore-state').innerHTML = [
     stackItem('REST Health', health.rest?.status || 'not checked'),
     stackItem('REST Latency', `${num(health.rest?.latency_ms)} ms`),
@@ -606,6 +672,32 @@ function renderCoinstore() {
       if (account) setCoinstoreAccountStatus(account, button.dataset.accountStatus === 'enable', button);
     });
   });
+}
+
+function exchangeCard(name, integration) {
+  const account = integration?.accounts?.[0] || null;
+  const status = account?.connection_status || integration?.status || 'disconnected';
+  const statusClass = status === 'connected' ? 'ok' : status === 'invalid_credentials' || status === 'error' ? 'bad' : status === 'testing' ? 'warn' : 'neutral';
+  const rest = account?.rest_status || 'disconnected';
+  const ws = account?.websocket_status || 'disconnected';
+  const privateWs = account?.private_ws_status || (name === 'coinstore' ? 'disconnected' : 'not_supported');
+  return `<div class="exchange-card">
+    <h3>${esc(title(name))}<span class="pill ${statusClass}">${esc(status)}</span></h3>
+    ${stackItem('REST Status', rest)}
+    ${stackItem('WebSocket Status', ws)}
+    ${stackItem('Private WS Status', privateWs)}
+    ${stackItem('API Key', account?.api_key_masked || 'not configured')}
+    ${stackItem('Last Successful Test', account?.last_success_at || 'never')}
+    ${stackItem('Last Failure', account?.last_failure_at || 'none')}
+    ${stackItem('Last Error', account?.last_error_message || 'none')}
+    <div class="button-row">
+      <button type="button" data-exchange="${esc(name)}" data-exchange-action="connect">Connect</button>
+      <button type="button" class="secondary" data-exchange="${esc(name)}" data-exchange-action="edit" ${account ? '' : 'disabled'}>Edit</button>
+      <button type="button" class="secondary" data-exchange="${esc(name)}" data-exchange-action="test" ${account ? '' : 'disabled'}>Test Connection</button>
+      <button type="button" class="secondary" data-exchange="${esc(name)}" data-exchange-action="refresh">Refresh Status</button>
+      <button type="button" class="danger" data-exchange="${esc(name)}" data-exchange-action="remove" ${account ? '' : 'disabled'}>Remove</button>
+    </div>
+  </div>`;
 }
 
 function accountItem(account) {
@@ -672,6 +764,7 @@ function init() {
   refreshRest();
   connectWebSocket();
   setInterval(refreshRest, 10000);
+  setInterval(() => { if (state.token) refreshCoinstore().then(renderCoinstore); }, 30000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -9,12 +9,13 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated
 
+import websockets
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mmbot.api.dependencies import get_database, get_redis, get_session
-from mmbot.api.schemas import DOMAIN_MODELS, ConfigResponse, ConfigUpdateRequest, ConfirmedActionRequest, ExchangeAccountCreateRequest, ExchangeAccountStatusRequest, HealthResponse, StrategyCommandRequest
+from mmbot.api.schemas import DOMAIN_MODELS, ConfigResponse, ConfigUpdateRequest, ConfirmedActionRequest, ExchangeAccountCreateRequest, ExchangeAccountStatusRequest, ExchangeConnectRequest, ExchangeRemoveRequest, ExchangeTestRequest, HealthResponse, StrategyCommandRequest
 from mmbot.core.config import get_settings
 from mmbot.core.security import decode_token, require_admin, require_config_write, require_incident_response, require_operations_access, require_risk_write, require_trading_control
 from mmbot.db import models
@@ -23,9 +24,15 @@ from mmbot.engines.volume.engine import VolumeEngine
 from mmbot.db.session import Database
 from mmbot.exchanges.adapters import create_adapter, supported_exchanges
 from mmbot.exchanges.auth import Credentials, HmacSigner
+from mmbot.exchanges.client import RestClient, WebSocketClient
+from mmbot.exchanges.registry import get_exchange_definition
+from mmbot.execution.client import PrivateRestExecutionClient
+from mmbot.execution.models import ExecutionVenue
 from mmbot.redis.manager import RedisManager
 from mmbot.runtime.config_service import MARKET_DATA_COMMAND_CHANNEL, MARKET_MAKER_COMMAND_CHANNEL, RuntimeConfigService, publish_runtime_command
 from mmbot.security.secrets import SecretCipher
+from mmbot.execution.coinstore_ws import CoinstorePrivateWebSocketClient
+from mmbot.execution.signing import ExecutionCredentials
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -90,6 +97,86 @@ async def update_domain_config(domain: str, request: ConfigUpdateRequest, sessio
 @router.get("/admin/exchanges/capabilities")
 async def exchange_capabilities(_: Annotated[dict, Depends(require_admin)]) -> dict:
     return supported_exchanges()
+
+
+@router.get("/exchanges")
+async def exchanges(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], settings=Depends(get_settings)) -> dict:
+    accounts = await _exchange_accounts(session)
+    by_exchange: dict[str, list[models.ExchangeAccount]] = {}
+    for account in accounts:
+        by_exchange.setdefault(account.exchange_name, []).append(account)
+    return {
+        "items": [
+            {
+                "exchange_name": name,
+                "capabilities": definition,
+                "accounts": [_exchange_account_payload(row, settings) for row in by_exchange.get(name, [])],
+                "status": _aggregate_exchange_status(by_exchange.get(name, [])),
+            }
+            for name, definition in supported_exchanges().items()
+        ]
+    }
+
+
+@router.get("/exchanges/status")
+async def exchanges_status(session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], settings=Depends(get_settings)) -> dict:
+    accounts = await _exchange_accounts(session)
+    return {"items": [_exchange_account_payload(row, settings) for row in accounts]}
+
+
+@router.post("/exchanges/connect")
+async def exchanges_connect(request: ExchangeConnectRequest, session: Annotated[AsyncSession, Depends(get_session)], redis: Annotated[RedisManager, Depends(get_redis)], actor: Annotated[dict, Depends(require_config_write)], settings=Depends(get_settings)) -> dict:
+    if request.exchange_name not in supported_exchanges():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unsupported exchange")
+    cipher = SecretCipher(settings)
+    result = await session.execute(select(models.ExchangeAccount).where(models.ExchangeAccount.exchange_name == request.exchange_name, models.ExchangeAccount.account_alias == request.account_alias, models.ExchangeAccount.environment == request.environment))
+    row = result.scalar_one_or_none()
+    before = _exchange_account_payload(row, settings) if row is not None else None
+    if row is None:
+        row = models.ExchangeAccount(exchange_name=request.exchange_name, account_alias=request.account_alias, environment=request.environment, api_key_ciphertext=cipher.encrypt(request.api_key) or b"", api_secret_ciphertext=cipher.encrypt(request.api_secret) or b"", passphrase_ciphertext=cipher.encrypt(request.passphrase), encryption_key_id=cipher.key_id, permissions=request.permissions, is_enabled=request.enabled)
+        session.add(row)
+    else:
+        row.api_key_ciphertext = cipher.encrypt(request.api_key) or b""
+        row.api_secret_ciphertext = cipher.encrypt(request.api_secret) or b""
+        row.passphrase_ciphertext = cipher.encrypt(request.passphrase)
+        row.encryption_key_id = cipher.key_id
+        row.permissions = request.permissions
+        row.is_enabled = request.enabled
+        row.connection_status = "disconnected"
+        row.rest_connected = False
+        row.websocket_connected = False
+        row.private_ws_connected = False
+        row.last_error_message = None
+    await session.flush()
+    payload = _exchange_account_payload(row, settings)
+    await AuditRepository(session).record("api", "EXCHANGE_CONNECT", "exchange_accounts", row.id, {"actor": actor.get("sub"), "exchange_name": row.exchange_name, "account_alias": row.account_alias}, before_state=before, after_state=payload)
+    await publish_runtime_command(session, redis, actor=actor, command_type="EXCHANGE_ACCOUNT_UPDATED", payload={"account_id": str(row.id), "exchange_name": row.exchange_name, "account_alias": row.account_alias}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="exchange_accounts")
+    return payload
+
+
+@router.post("/exchanges/test")
+async def exchanges_test(request: ExchangeTestRequest, session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_config_write)], settings=Depends(get_settings)) -> dict:
+    row = await _exchange_account(session, request.exchange_name, request.account_alias, request.environment)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="exchange account not found")
+    result = await _test_exchange_connection(row, settings)
+    await _apply_exchange_test_result(row, result)
+    await session.flush()
+    await session.refresh(row)
+    return _exchange_account_payload(row, settings) | {"test_result": result}
+
+
+@router.delete("/exchanges/remove")
+async def exchanges_remove(request: ExchangeRemoveRequest, session: Annotated[AsyncSession, Depends(get_session)], redis: Annotated[RedisManager, Depends(get_redis)], actor: Annotated[dict, Depends(require_config_write)], settings=Depends(get_settings)) -> dict:
+    _require_confirmation(request.confirmation, "remove")
+    row = await _exchange_account(session, request.exchange_name, request.account_alias, request.environment)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="exchange account not found")
+    before = _exchange_account_payload(row, settings)
+    await session.delete(row)
+    await AuditRepository(session).record("api", "EXCHANGE_REMOVE", "exchange_accounts", row.id, {"actor": actor.get("sub"), "exchange_name": request.exchange_name, "account_alias": request.account_alias}, before_state=before, after_state=None)
+    await publish_runtime_command(session, redis, actor=actor, command_type="EXCHANGE_ACCOUNT_REMOVED", payload={"exchange_name": request.exchange_name, "account_alias": request.account_alias}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="exchange_accounts")
+    return {"removed": True, "exchange_name": request.exchange_name, "account_alias": request.account_alias}
 
 
 @router.get("/operations/runtime-config")
@@ -646,9 +733,137 @@ def _runtime_event_payload(row: models.RuntimeEvent) -> dict:
     }
 
 
-def _exchange_account_payload(row: models.ExchangeAccount | None) -> dict | None:
+async def _exchange_accounts(session: AsyncSession) -> list[models.ExchangeAccount]:
+    result = await session.execute(select(models.ExchangeAccount).order_by(models.ExchangeAccount.exchange_name, models.ExchangeAccount.account_alias))
+    return list(result.scalars().all())
+
+
+async def _exchange_account(session: AsyncSession, exchange_name: str, account_alias: str, environment: str) -> models.ExchangeAccount | None:
+    result = await session.execute(select(models.ExchangeAccount).where(models.ExchangeAccount.exchange_name == exchange_name, models.ExchangeAccount.account_alias == account_alias, models.ExchangeAccount.environment == environment))
+    return result.scalar_one_or_none()
+
+
+def _aggregate_exchange_status(accounts: list[models.ExchangeAccount]) -> str:
+    if not accounts:
+        return "disconnected"
+    if any(row.connection_status == "connected" for row in accounts):
+        return "connected"
+    if any(row.connection_status == "invalid_credentials" for row in accounts):
+        return "invalid_credentials"
+    if any(row.connection_status == "testing" for row in accounts):
+        return "testing"
+    if any(row.connection_status == "error" for row in accounts):
+        return "error"
+    return "disconnected"
+
+
+async def _test_exchange_connection(row: models.ExchangeAccount, settings) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    definition = get_exchange_definition(row.exchange_name)
+    result: dict[str, Any] = {
+        "exchange_name": row.exchange_name,
+        "account_alias": row.account_alias,
+        "environment": row.environment,
+        "status": "testing",
+        "rest_status": "testing",
+        "websocket_status": "testing",
+        "private_ws_status": "not_supported",
+        "last_tested_at": now.isoformat(),
+        "error": None,
+    }
+    row.connection_status = "testing"
+    row.last_tested_at = now
+    rest = RestClient(definition, settings.HTTP_TIMEOUT_SECONDS)
+    try:
+        await rest.health()
+        result["rest_status"] = "connected"
+    except Exception as exc:
+        result["rest_status"] = "error"
+        result["status"] = "network_error"
+        result["error"] = f"REST_FAILED:{exc.__class__.__name__}:{exc}"
+        return result
+    finally:
+        await rest.close()
+
+    try:
+        async with websockets.connect(definition.websocket_url, ping_interval=settings.EXCHANGE_RECONNECT_MAX_DELAY_SECONDS, ping_timeout=settings.EXCHANGE_RECONNECT_MAX_DELAY_SECONDS):
+            result["websocket_status"] = "connected"
+    except Exception as exc:
+        result["websocket_status"] = "error"
+        result["status"] = "network_error"
+        result["error"] = f"WEBSOCKET_FAILED:{exc.__class__.__name__}:{exc}"
+        return result
+
+    if row.exchange_name == "coinstore":
+        cipher = SecretCipher(settings)
+        api_key = cipher.decrypt(row.api_key_ciphertext)
+        api_secret = cipher.decrypt(row.api_secret_ciphertext)
+        if not api_key or not api_secret:
+            result["private_ws_status"] = "invalid_credentials"
+            result["status"] = "invalid_credentials"
+            result["error"] = "INVALID_CREDENTIALS:missing_api_key_or_secret"
+            return result
+        credentials = ExecutionCredentials(api_key=api_key, api_secret=api_secret, passphrase=cipher.decrypt(row.passphrase_ciphertext))
+        client = PrivateRestExecutionClient(ExecutionVenue.coinstore, settings, credentials)
+        try:
+            balances = await client.sync_balances()
+            result["authenticated_rest_status"] = "connected"
+            result["account_assets_seen"] = len(balances)
+        except Exception as exc:
+            result["private_ws_status"] = "not_tested"
+            result["status"] = "invalid_credentials" if "signature" in str(exc).lower() or "401" in str(exc) else "rest_failed"
+            result["error"] = f"AUTH_REST_FAILED:{exc.__class__.__name__}:{exc}"
+            return result
+        finally:
+            await client.close()
+        private_ws = CoinstorePrivateWebSocketClient(settings, credentials)
+        try:
+            private_result = await private_ws.test_connection()
+            result["private_ws_status"] = "connected" if private_result.get("connected") else "error"
+            result["private_ws_auth_response"] = private_result.get("auth_response")
+            result["private_ws_subscribe_response"] = private_result.get("subscribe_response")
+        except Exception as exc:
+            result["private_ws_status"] = "error"
+            result["status"] = "private_ws_failed"
+            result["error"] = f"PRIVATE_WS_FAILED:{exc.__class__.__name__}:{exc}"
+            return result
+
+    result["status"] = "connected"
+    return result
+
+
+async def _apply_exchange_test_result(row: models.ExchangeAccount, result: dict[str, Any]) -> None:
+    now = datetime.now(timezone.utc)
+    row.last_tested_at = now
+    row.rest_connected = result.get("rest_status") == "connected"
+    row.websocket_connected = result.get("websocket_status") == "connected"
+    row.private_ws_connected = result.get("private_ws_status") in {"connected", "not_supported"}
+    row.connection_status = str(result.get("status") or "error")
+    if row.connection_status == "connected":
+        row.last_success_at = now
+        row.last_error_message = None
+    else:
+        row.last_failure_at = now
+        row.last_error_message = str(result.get("error") or row.connection_status)
+
+
+def _mask_secret(value: str | None) -> str | None:
+    if not value:
+        return None
+    if len(value) <= 8:
+        return f"{value[:2]}****{value[-2:]}"
+    return f"{value[:4]}********{value[-4:]}"
+
+
+def _exchange_account_payload(row: models.ExchangeAccount | None, settings=None) -> dict | None:
     if row is None:
         return None
+    masked_api_key = None
+    if settings is not None and row.api_key_ciphertext:
+        try:
+            masked_api_key = _mask_secret(SecretCipher(settings).decrypt(row.api_key_ciphertext))
+        except Exception:
+            masked_api_key = None
     return {
         "id": str(row.id),
         "exchange_name": row.exchange_name,
@@ -656,10 +871,20 @@ def _exchange_account_payload(row: models.ExchangeAccount | None) -> dict | None
         "environment": row.environment,
         "permissions": row.permissions,
         "is_enabled": row.is_enabled,
+        "enabled": row.is_enabled,
+        "api_key_masked": masked_api_key,
         "has_api_key": bool(row.api_key_ciphertext),
         "has_api_secret": bool(row.api_secret_ciphertext),
         "has_passphrase": bool(row.passphrase_ciphertext),
         "encryption_key_id": row.encryption_key_id,
+        "rest_status": "connected" if row.rest_connected else "disconnected",
+        "websocket_status": "connected" if row.websocket_connected else "disconnected",
+        "private_ws_status": "connected" if row.private_ws_connected else "disconnected",
+        "connection_status": row.connection_status,
+        "last_tested_at": _iso(row.last_tested_at),
+        "last_success_at": _iso(row.last_success_at),
+        "last_failure_at": _iso(row.last_failure_at),
+        "last_error_message": row.last_error_message,
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }

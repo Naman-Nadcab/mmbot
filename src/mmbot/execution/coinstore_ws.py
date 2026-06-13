@@ -80,6 +80,18 @@ class CoinstorePrivateWebSocketClient:
                 await asyncio.sleep(delay)
                 delay = min(self.max_reconnect_delay_seconds, delay * 2)
 
+    async def test_connection(self, timeout_seconds: float = 8.0) -> dict[str, Any]:
+        async with websockets.connect(self.websocket_url, ping_interval=self.heartbeat_interval_seconds, ping_timeout=self.heartbeat_interval_seconds) as ws:
+            await ws.send(json.dumps(self.auth_payload(), separators=(",", ":")))
+            auth_response = await asyncio.wait_for(ws.recv(), timeout=timeout_seconds)
+            await ws.send(json.dumps(self.subscribe_payload(), separators=(",", ":")))
+            subscribe_response = await asyncio.wait_for(ws.recv(), timeout=timeout_seconds)
+        return {
+            "connected": True,
+            "auth_response": json.loads(auth_response) if isinstance(auth_response, str) else {"binary": auth_response.hex()},
+            "subscribe_response": json.loads(subscribe_response) if isinstance(subscribe_response, str) else {"binary": subscribe_response.hex()},
+        }
+
     async def _authenticate_and_subscribe(self, ws: Any) -> None:
         await ws.send(json.dumps(self.auth_payload(), separators=(",", ":")))
         await ws.send(json.dumps(self.subscribe_payload(), separators=(",", ":")))

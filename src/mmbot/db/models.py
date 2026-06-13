@@ -199,6 +199,14 @@ class ExchangeAccount(Base, TimestampMixin):
     encryption_key_id: Mapped[str] = mapped_column(Text, nullable=False)
     permissions: Mapped[list[Any]] = mapped_column(PortableJSON, default=list, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    rest_connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    websocket_connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    private_ws_connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    connection_status: Mapped[str] = mapped_column(Text, default="disconnected", nullable=False)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_message: Mapped[str | None] = mapped_column(Text)
     __table_args__ = (UniqueConstraint("exchange_name", "account_alias", "environment", name="uq_exchange_accounts_alias"),)
 
 

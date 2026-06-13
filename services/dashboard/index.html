@@ -82,8 +82,10 @@
       <section id="page-coinstore" class="page">
         <div id="exchange-panel" class="settings-grid"></div>
         <article class="glass-panel data-panel">
-          <div class="panel-header"><h2>Coinstore API Key Management</h2><span class="muted">Secrets are write-only</span></div>
+          <div class="panel-header"><h2>Exchange Integration Center</h2><span class="muted">Secrets are write-only; API keys are masked after save</span></div>
+          <div id="exchange-cards" class="exchange-grid"></div>
           <form id="coinstore-form" class="form-grid">
+            <label>Exchange<select name="exchange_name"><option>coinstore</option><option>mexc</option><option>gate</option><option>bitmart</option><option>kucoin</option><option>binance</option></select></label>
             <label>Account Alias<input name="account_alias" value="primary" autocomplete="off" /></label>
             <label>Environment<select name="environment"><option>production</option><option>staging</option><option>sandbox</option></select></label>
             <label>API Key<input name="api_key" type="password" autocomplete="off" /></label>
@@ -91,7 +93,7 @@
             <label>Passphrase<input name="passphrase" type="password" autocomplete="off" /></label>
             <label>Permissions<input name="permissions" value="read,trade" autocomplete="off" /></label>
             <label>Enabled<select name="is_enabled"><option value="false">false</option><option value="true">true</option></select></label>
-            <div class="button-row"><button type="submit">Store Encrypted Credentials</button><button id="coinstore-health" type="button" class="secondary">Check Health</button><button id="coinstore-sync" type="button" class="secondary">Sync Balances</button></div>
+            <div class="button-row"><button type="submit">Connect / Save</button><button id="coinstore-health" type="button" class="secondary">Refresh Status</button><button id="coinstore-sync" type="button" class="secondary">Sync Balances</button></div>
           </form>
           <div id="coinstore-state" class="metric-stack"></div>
         </article>
