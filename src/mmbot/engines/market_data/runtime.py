@@ -427,7 +427,7 @@ class MarketDataRuntime:
         self.metrics.increment("market_data.websocket_messages_received")
         if venue is ExecutionVenue.coinstore and message is not None and self.raw_messages_logged < 20:
             self.raw_messages_logged += 1
-            logger.info("raw_message_received", extra={"venue": venue.value, "raw_message_index": self.raw_messages_logged, "message": message})
+            logger.info("raw_message_received", extra={"venue": venue.value, "raw_message_index": self.raw_messages_logged, "raw_message": message})
 
     def _raw_message_samples(self) -> dict[str, list[dict[str, Any]]]:
         samples: dict[str, list[dict[str, Any]]] = {}
@@ -449,11 +449,11 @@ class MarketDataRuntime:
             normalized = self.normalizer.normalize(venue, symbol, message)
         except Exception as exc:
             self.metrics.increment("market_data.normalization_errors")
-            logger.warning("normalization_dropped", extra={"venue": venue.value, "symbol": symbol, "reason": f"{exc.__class__.__name__}: {exc}", "message": message})
+            logger.warning("normalization_dropped", extra={"venue": venue.value, "symbol": symbol, "reason": f"{exc.__class__.__name__}: {exc}", "raw_message": message})
             return
         if normalized is None:
             self.metrics.increment("market_data.normalization_dropped")
-            logger.info("normalization_dropped", extra={"venue": venue.value, "symbol": symbol, "reason": "unrecognized_or_control_message", "message": message})
+            logger.info("normalization_dropped", extra={"venue": venue.value, "symbol": symbol, "reason": "unrecognized_or_control_message", "raw_message": message})
             return
         kind, payload = normalized
         self.normalization_success_count += 1
