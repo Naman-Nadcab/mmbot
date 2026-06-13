@@ -15,7 +15,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mmbot.api.dependencies import get_database, get_redis, get_session
-from mmbot.api.schemas import DOMAIN_MODELS, ConfigResponse, ConfigUpdateRequest, ConfirmedActionRequest, ExchangeAccountCreateRequest, ExchangeAccountStatusRequest, ExchangeConnectRequest, ExchangeRemoveRequest, ExchangeTestRequest, HealthResponse, StrategyCommandRequest
+from mmbot.api.schemas import DOMAIN_MODELS, ConfigResponse, ConfigUpdateRequest, ConfirmedActionRequest, ExchangeAccountCreateRequest, ExchangeAccountStatusRequest, ExchangeConnectRequest, ExchangeRemoveRequest, ExchangeSyncRequest, ExchangeTestRequest, HealthResponse, StrategyCommandRequest
 from mmbot.core.config import get_settings
 from mmbot.core.security import decode_token, require_admin, require_config_write, require_incident_response, require_operations_access, require_risk_write, require_trading_control
 from mmbot.db import models
@@ -27,6 +27,7 @@ from mmbot.exchanges.auth import Credentials, HmacSigner
 from mmbot.exchanges.client import RestClient, WebSocketClient
 from mmbot.exchanges.registry import get_exchange_definition
 from mmbot.execution.client import PrivateRestExecutionClient
+from mmbot.execution.coinstore import CoinstoreExecutionService
 from mmbot.execution.models import ExecutionVenue
 from mmbot.redis.manager import RedisManager
 from mmbot.runtime.config_service import MARKET_DATA_COMMAND_CHANNEL, MARKET_MAKER_COMMAND_CHANNEL, RuntimeConfigService, publish_runtime_command
@@ -148,6 +149,7 @@ async def exchanges_connect(request: ExchangeConnectRequest, session: Annotated[
         row.private_ws_connected = False
         row.last_error_message = None
     await session.flush()
+    await session.refresh(row)
     payload = _exchange_account_payload(row, settings)
     await AuditRepository(session).record("api", "EXCHANGE_CONNECT", "exchange_accounts", row.id, {"actor": actor.get("sub"), "exchange_name": row.exchange_name, "account_alias": row.account_alias}, before_state=before, after_state=payload)
     await publish_runtime_command(session, redis, actor=actor, command_type="EXCHANGE_ACCOUNT_UPDATED", payload={"account_id": str(row.id), "exchange_name": row.exchange_name, "account_alias": row.account_alias}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="exchange_accounts")
@@ -177,6 +179,25 @@ async def exchanges_remove(request: ExchangeRemoveRequest, session: Annotated[As
     await AuditRepository(session).record("api", "EXCHANGE_REMOVE", "exchange_accounts", row.id, {"actor": actor.get("sub"), "exchange_name": request.exchange_name, "account_alias": request.account_alias}, before_state=before, after_state=None)
     await publish_runtime_command(session, redis, actor=actor, command_type="EXCHANGE_ACCOUNT_REMOVED", payload={"exchange_name": request.exchange_name, "account_alias": request.account_alias}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="exchange_accounts")
     return {"removed": True, "exchange_name": request.exchange_name, "account_alias": request.account_alias}
+
+
+@router.get("/exchanges/{exchange_name}/balances")
+async def exchange_balances(exchange_name: str, session: Annotated[AsyncSession, Depends(get_session)], _: Annotated[dict, Depends(require_operations_access)], settings=Depends(get_settings), account_alias: str = "primary", environment: str = "production") -> dict:
+    row = await _exchange_account(session, exchange_name.lower(), account_alias, environment)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="exchange account not found")
+    return await _exchange_balances_payload(row, session, settings)
+
+
+@router.post("/exchanges/{exchange_name}/sync")
+async def exchange_balance_sync(exchange_name: str, request: ExchangeSyncRequest, session: Annotated[AsyncSession, Depends(get_session)], redis: Annotated[RedisManager, Depends(get_redis)], actor: Annotated[dict, Depends(require_config_write)], settings=Depends(get_settings)) -> dict:
+    row = await _exchange_account(session, exchange_name.lower(), request.account_alias, request.environment)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="exchange account not found")
+    result = await _sync_exchange_balances(row, session, settings)
+    await AuditRepository(session).record("api", "EXCHANGE_BALANCE_SYNC", "inventory_snapshots", row.id, {"actor": actor.get("sub"), "exchange_name": row.exchange_name, "account_alias": row.account_alias, "rows_written": result["rows_written"]})
+    await publish_runtime_command(session, redis, actor=actor, command_type="EXCHANGE_BALANCE_SYNC", payload={"account_id": str(row.id), "exchange_name": row.exchange_name, "account_alias": row.account_alias, "rows_written": result["rows_written"]}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="inventory_snapshots")
+    return result
 
 
 @router.get("/operations/runtime-config")
@@ -295,28 +316,10 @@ async def coinstore_balance_sync(request: ConfirmedActionRequest, session: Annot
     account = result.scalar_one_or_none()
     if account is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="no enabled coinstore account")
-    cipher = SecretCipher(settings)
-    api_key = cipher.decrypt(account.api_key_ciphertext)
-    api_secret = cipher.decrypt(account.api_secret_ciphertext)
-    if not api_key or not api_secret:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="coinstore account is missing credentials")
-    adapter = create_adapter("coinstore", settings, "coinstore")
-    try:
-        adapter.rest.signer = HmacSigner(Credentials(api_key, api_secret, cipher.decrypt(account.passphrase_ciphertext)))
-        raw = await adapter.rest_request("GET", "/api/spot/accountList", signed=True)
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"coinstore balance sync failed: {exc}") from exc
-    finally:
-        await adapter.close()
-    balances = _parse_balance_rows(raw)
-    captured_at = datetime.now(timezone.utc)
-    rows_written = 0
-    for item in balances:
-        session.add(models.InventorySnapshot(exchange_account_id=account.id, asset=item["asset"], total_balance=Decimal(str(item["total"])), available_balance=Decimal(str(item["available"])), reserved_balance=Decimal(str(item["reserved"])), valuation_asset="USDT", valuation_price=None, valuation_amount=None, captured_at=captured_at, metadata_json={"source": "coinstore_balance_sync"}))
-        rows_written += 1
-    await AuditRepository(session).record("api", "COINSTORE_BALANCE_SYNC", "inventory_snapshots", account.id, {"actor": actor.get("sub"), "rows_written": rows_written, "reason": request.reason})
-    await publish_runtime_command(session, redis, actor=actor, command_type="COINSTORE_BALANCE_SYNC", payload={"account_id": str(account.id), "rows_written": rows_written}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="inventory_snapshots")
-    return {"rows_written": rows_written, "captured_at": captured_at.isoformat()}
+    payload = await _sync_exchange_balances(account, session, settings)
+    await AuditRepository(session).record("api", "COINSTORE_BALANCE_SYNC", "inventory_snapshots", account.id, {"actor": actor.get("sub"), "rows_written": payload["rows_written"], "reason": request.reason})
+    await publish_runtime_command(session, redis, actor=actor, command_type="COINSTORE_BALANCE_SYNC", payload={"account_id": str(account.id), "rows_written": payload["rows_written"]}, channel=MARKET_DATA_COMMAND_CHANNEL, resource_type="inventory_snapshots")
+    return payload
 
 
 @router.get("/operations/engines")
@@ -830,6 +833,63 @@ async def _test_exchange_connection(row: models.ExchangeAccount, settings) -> di
 
     result["status"] = "connected"
     return result
+
+
+async def _sync_exchange_balances(row: models.ExchangeAccount, session: AsyncSession, settings) -> dict[str, Any]:
+    if row.exchange_name != "coinstore":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="balance sync is currently supported for coinstore")
+    service = CoinstoreExecutionService(settings, session)
+    service._account = row
+    client = await service.client()
+    try:
+        balances = await client.sync_balances()
+        service.validation.verify_balance_response([balance.raw for balance in balances])
+        snapshots = [await service.persist_balance_update(balance) for balance in balances]
+    finally:
+        await service.close()
+    payload = await _exchange_balances_payload(row, session, settings)
+    payload["rows_written"] = len(snapshots)
+    payload["synced_at"] = datetime.now(timezone.utc).isoformat()
+    return payload
+
+
+async def _exchange_balances_payload(row: models.ExchangeAccount, session: AsyncSession, settings) -> dict[str, Any]:
+    result = await session.execute(select(models.InventorySnapshot).where(models.InventorySnapshot.exchange_account_id == row.id).order_by(desc(models.InventorySnapshot.captured_at)))
+    latest: dict[str, models.InventorySnapshot] = {}
+    for snapshot in result.scalars().all():
+        latest.setdefault(snapshot.asset, snapshot)
+    items = [_exchange_balance_payload(snapshot) for snapshot in latest.values()]
+    portfolio_value = sum(float(item["valuation_amount"] or 0) for item in items)
+    if portfolio_value <= 0:
+        portfolio_value = sum(float(item["total_balance"] or 0) for item in items if item["asset"] in {"USDT", "USD", "USDC"})
+    base_asset = settings.PAPER_BASE_ASSET.upper()
+    base_value = sum(float(item["valuation_amount"] or 0) for item in items if item["asset"] == base_asset)
+    inventory_ratio = 0.0 if portfolio_value <= 0 else base_value / portfolio_value
+    for item in items:
+        value = float(item["valuation_amount"] or 0)
+        item["exposure_percent"] = 0.0 if portfolio_value <= 0 else round(value / portfolio_value * 100, 6)
+    return {
+        "exchange_name": row.exchange_name,
+        "account_alias": row.account_alias,
+        "environment": row.environment,
+        "portfolio_value": portfolio_value,
+        "inventory_ratio": inventory_ratio,
+        "balances": items,
+    }
+
+
+def _exchange_balance_payload(row: models.InventorySnapshot) -> dict[str, Any]:
+    return {
+        "asset": row.asset,
+        "available_balance": _float(row.available_balance),
+        "locked_balance": _float(row.reserved_balance),
+        "reserved_balance": _float(row.reserved_balance),
+        "total_balance": _float(row.total_balance),
+        "valuation_asset": row.valuation_asset,
+        "valuation_price": _float(row.valuation_price),
+        "valuation_amount": _float(row.valuation_amount),
+        "captured_at": _iso(row.captured_at),
+    }
 
 
 async def _apply_exchange_test_result(row: models.ExchangeAccount, result: dict[str, Any]) -> None:

@@ -81,3 +81,8 @@ class ExchangeTestRequest(BaseModel):
 
 class ExchangeRemoveRequest(ExchangeTestRequest):
     confirmation: str = Field(min_length=3)
+
+
+class ExchangeSyncRequest(BaseModel):
+    account_alias: str = Field(default="primary", min_length=1)
+    environment: Literal["sandbox", "staging", "production"] = "production"

@@ -44,7 +44,7 @@ const state = {
   runtimeEvents: [],
   history: { pnl: [], inventory: [] },
   pagination: { orders: { page: 0, size: 50 }, trades: { page: 0, size: 50 } },
-  data: { engines: {}, infrastructure: {}, exchanges: {}, exchangeIntegrations: [], orders: [], trades: [], positions: [], inventory: null, pnl: null, riskEvents: [], auditLogs: [], volume: null, coinstore: {}, kill: null }
+  data: { engines: {}, infrastructure: {}, exchanges: {}, exchangeIntegrations: [], exchangeBalances: {}, orders: [], trades: [], positions: [], inventory: null, pnl: null, riskEvents: [], auditLogs: [], volume: null, coinstore: {}, kill: null }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -355,6 +355,19 @@ async function refreshCoinstore() {
   try { state.data.exchangeIntegrations = (await request('/exchanges')).items || []; } catch (error) { logEvent('exchange_integrations_unavailable', { error: error.message }); }
   try { state.data.coinstore.accounts = (await request('/admin/coinstore/accounts')).items || []; } catch (error) { logEvent('coinstore_accounts_unavailable', { error: error.message }); }
   try { state.data.coinstore.health = await request('/admin/coinstore/health'); } catch (error) { state.data.coinstore.health = { rest: { status: 'unavailable', error: error.message } }; }
+  await refreshExchangeBalances();
+}
+
+async function refreshExchangeBalances() {
+  for (const integration of state.data.exchangeIntegrations || []) {
+    const account = integration.accounts?.[0];
+    if (!account) continue;
+    try {
+      state.data.exchangeBalances[integration.exchange_name] = await request(`/exchanges/${integration.exchange_name}/balances?account_alias=${encodeURIComponent(account.account_alias)}&environment=${encodeURIComponent(account.environment)}`);
+    } catch (error) {
+      state.data.exchangeBalances[integration.exchange_name] = { balances: [], error: error.message };
+    }
+  }
 }
 
 function initCoinstore() {
@@ -407,8 +420,10 @@ function initCoinstore() {
     }
     try {
       setPending('coinstore:sync', true, event.target);
-      const result = await request('/admin/coinstore/balance-sync', { method: 'POST', body: JSON.stringify({ confirmation, reason: 'operator balance sync' }) });
+      const account = (state.data.exchangeIntegrations || []).find((item) => item.exchange_name === 'coinstore')?.accounts?.[0];
+      const result = await request('/exchanges/coinstore/sync', { method: 'POST', body: JSON.stringify({ account_alias: account?.account_alias || 'primary', environment: account?.environment || 'production' }) });
       logEvent('coinstore_balance_sync', result);
+      await refreshCoinstore();
       await refreshOperations();
     } finally {
       setPending('coinstore:sync', false, event.target);
@@ -676,6 +691,8 @@ function renderCoinstore() {
 
 function exchangeCard(name, integration) {
   const account = integration?.accounts?.[0] || null;
+  const balancePayload = state.data.exchangeBalances?.[name] || {};
+  const balances = balancePayload.balances || [];
   const status = account?.connection_status || integration?.status || 'disconnected';
   const statusClass = status === 'connected' ? 'ok' : status === 'invalid_credentials' || status === 'error' ? 'bad' : status === 'testing' ? 'warn' : 'neutral';
   const rest = account?.rest_status || 'disconnected';
@@ -690,6 +707,9 @@ function exchangeCard(name, integration) {
     ${stackItem('Last Successful Test', account?.last_success_at || 'never')}
     ${stackItem('Last Failure', account?.last_failure_at || 'none')}
     ${stackItem('Last Error', account?.last_error_message || 'none')}
+    ${stackItem('Portfolio Value', money(balancePayload.portfolio_value || 0))}
+    ${stackItem('Inventory Ratio', `${num((balancePayload.inventory_ratio || 0) * 100)}%`)}
+    ${balances.length ? `<div class="metric-stack">${balances.slice(0, 6).map((item) => stackItem(item.asset, `${num(item.available_balance)} available / ${num(item.locked_balance)} locked / ${num(item.total_balance)} total`)).join('')}</div>` : stackItem('Balances', balancePayload.error || 'No balances synced')}
     <div class="button-row">
       <button type="button" data-exchange="${esc(name)}" data-exchange-action="connect">Connect</button>
       <button type="button" class="secondary" data-exchange="${esc(name)}" data-exchange-action="edit" ${account ? '' : 'disabled'}>Edit</button>
